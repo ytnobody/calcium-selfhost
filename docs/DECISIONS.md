@@ -63,9 +63,8 @@ match get(args, 2)
 ```
 
 A payload position is now a binding name, `_`, or a literal matched by value;
-anything else is a parse error. A literal payload in the final arm is rejected
-at compile time, because the final arm is the catch-all and the comparison could
-never reject it.
+anything else is a parse error. A literal payload works in any arm, including the
+final one, because every arm is conditional (see D7).
 
 Still open from the same area: a bare identifier in a match arm is compiled as an
 expression to compare, not as a catch-all binding, so there is no "bind the rest"
@@ -90,29 +89,39 @@ time. The intended approach is to build an immutable list of opcode values and
 convert it to bytes once. That conversion has no primitive today; add one to the
 native boundary when SH-3 needs it, rather than adding a general mutable buffer.
 
-## D7 — The final match arm is an implicit catch-all (open, blocks SH-2)
+## D7 — The final match arm is an implicit catch-all (**fixed upstream**)
 
-Found while fixing D4. `compileMatch` only emits a conditional jump for
-non-final arms: the final arm's tag check is popped and discarded, so **the
-final arm always runs** whatever its constructor.
+Found while fixing D4, fixed in `calcium-lang` by
+`fix(lang): make every match arm conditional`.
+
+`compileMatch` only emitted a conditional jump for non-final arms: the final
+arm's tag check was popped and discarded, so **the final arm always ran**,
+whatever its constructor.
 
 ```calcium
 match tok
     Token.Ident(name) => ...
     Token.Int(n)     => ...
-    Token.Other      => ...   // runs even when tok is Token.Ident
+    Token.Other      => ...   // ran even when tok was Token.Ident
 ```
 
-For a parser this is a landmine: the final arm's body runs with unbound payload
-variables (or stale bindings from an earlier attempt), producing silent nonsense
-rather than a diagnostic. The same shape exists for non-constructor patterns.
+For a parser this was a landmine: the final arm's body ran with unbound payload
+variables, producing silent nonsense rather than a diagnostic.
 
-D4 works around it by rejecting literal payloads in the final arm, but the
-underlying issue — there is no "no arm matched" outcome — is unresolved and
-needs a decision before the parser is written. The likely shape is a new
-appended opcode that raises a runtime error when no arm matched
-(`bone-format.md` is append-only, so this is a compatible addition), plus a
-`-O2`-independent rule that the compiler emits it whenever the final arm is not
-`_`.
+**Decision: every arm is conditional; if none matches, the match raises a
+runtime error** naming the value, via a new appended opcode `OpMatchFail` (85).
+Alternatives rejected:
 
-Until then: always end a `match` on a `_` arm.
+- *Require the final arm to be `_`*: fully static and easy to check, but it
+  forbids genuinely exhaustive matches, needs a syntactic special case, and
+  would have to be relaxed once exhaustiveness checking exists.
+- *Return `failure(...)`*: makes every non-Result context depend on match
+  exhaustiveness, which the type system cannot track.
+- *Keep the implicit catch-all*: this is what silently ran the wrong branch.
+
+Consequences for SH-2: an unhandled token now fails loudly with the offending
+value in the message, which is what a parser needs. Always end a `match` on `_`
+for a total function.
+
+The `.bone` format gained opcode 85 (`bone-format.md` §5.1); it is emitted only
+when the final arm can reject, so exhaustive matches are unchanged.
