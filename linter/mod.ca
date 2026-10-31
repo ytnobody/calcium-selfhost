@@ -1,0 +1,10 @@
+// linter - Static analysis over the AST (SH-3).
+//
+// Not implemented yet. See ../SPEC.md and
+// calcium-lang/specs/selfhost-scope.md for the stage plan and scope.
+
+namespace linter;
+
+// implemented reports whether this component exists yet. The differential
+// harness uses it to decide which comparisons it can run.
+func implemented() = false;

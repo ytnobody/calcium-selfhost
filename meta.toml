@@ -1,0 +1,12 @@
+name = "calcium-selfhost"
+author = "ytnobody"
+description = "The Calcium toolchain, written in Calcium"
+license = "MIT"
+keywords = ["calcium", "compiler", "selfhost"]
+entry = "mod.ca"
+
+# The reference implementation and the differential-test corpus are consumed
+# from the calcium-lang checkout, never declared as a bone dependency: they must
+# be pinned to a commit (see oracle.pin), not resolved to a release.
+#
+# [dependencies]

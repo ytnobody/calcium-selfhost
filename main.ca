@@ -1,0 +1,49 @@
+use core.io!;
+use core.os!;
+use core.string;
+use core.array;
+
+// calcium-selfhost CLI entry point.
+//
+// Run with the reference interpreter:
+//   calcium main.ca <command> [args]
+//
+// The command set is fixed by SPEC.md §2 because the differential test harness
+// drives it. Adding a command is fine; changing the existing shape is not.
+
+func version() = "0.1.0";
+
+func usage_lines() = [
+    "usage: calcium main.ca <command> [args]",
+    "",
+    "commands:",
+    "  version                   print the candidate version",
+    "  fmt <in> -o <out>         format <in> into <out>",
+    "  lex <in>                  dump tokens (debugging only)",
+    "  parse <in>                dump the AST (debugging only)",
+    "  compile <in> -o <out>     compile <in> into <out> (.bone)",
+    "",
+    "Nothing is implemented yet; see SPEC.md for the stage plan."
+];
+
+func usage() = string.join(usage_lines(), "\n");
+
+// unimplemented reports that a known command has no implementation yet and
+// exits non-zero so that scripts and CI do not treat it as success.
+func unimplemented(cmd) = do
+    concat("calcium-selfhost: '", cmd, "' is not implemented yet (see SPEC.md)") !> io.say
+    os.exit(1)
+end;
+
+args = os.args();
+
+// argv is [interpreter, main.ca, command, ...] so the command is at index 2.
+cmd = match get(args, 2)
+    Maybe.Some(v) => v
+    Maybe.None => "";
+
+match cmd
+    "version" => concat("calcium-selfhost ", version()) !> io.say
+    "help" => usage() !> io.say
+    "" => usage() !> io.say
+    _ => unimplemented(cmd);

@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  differential:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the candidate implementation
+        uses: actions/checkout@v7
+        with:
+          path: selfhost
+
+      - name: Read the oracle pin
+        id: pin
+        run: |
+          sha=$(tr -d '[:space:]' < selfhost/oracle.pin)
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::oracle.pin must contain a full commit SHA, got '$sha'"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # The reference implementation is consumed, never forked: a branch or tag
+      # would make the oracle move and failures unreproducible (SPEC.md §5).
+      - name: Check out the reference implementation at the pinned commit
+        uses: actions/checkout@v7
+        with:
+          repository: ytnobody/calcium-lang
+          ref: ${{ steps.pin.outputs.sha }}
+          path: oracle-src
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+
+      - name: Build the reference compiler (oracle)
+        run: |
+          mkdir -p "$RUNNER_TEMP/oracle"
+          go build -C oracle-src -o "$RUNNER_TEMP/oracle/calcium" ./cmd/calcium
+
+      - name: Sanity-check the oracle
+        run: "$RUNNER_TEMP/oracle/calcium" version
+
+      - name: Run the differential harness
+        env:
+          ORACLE: ${{ runner.temp }}/oracle/calcium
+          CALCIUM_LANG: ${{ github.workspace }}/oracle-src
+          # Flip to '1' once the first stage (formatter) is implemented, so that
+          # a silently-skipped stage cannot keep CI green.
+          STRICT: '0'
+        run: bash selfhost/tests/differential.sh

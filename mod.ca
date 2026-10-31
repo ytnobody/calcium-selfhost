@@ -1,0 +1,29 @@
+// calcium-selfhost - the Calcium toolchain, written in Calcium.
+//
+// This module is the library surface. The executable entry point is main.ca.
+// Normative specifications live in the reference repository; see SPEC.md.
+
+namespace selfhost;
+
+
+// version is the candidate implementation version. It is independent of the
+// reference implementation version it targets (see oracle.pin).
+func version() = "0.1.0";
+
+// stage reports the self-hosting stage reached. See SPEC.md §1.
+//   "scaffold" - nothing implemented
+//   "sh2"      - front end + formatter
+//   "sh3"      - compiler emitting .bone
+//   "sh4"      - bytecode VM
+func stage() = "scaffold";
+
+// components lists the in-scope components and whether each is implemented.
+func components() = {
+    lexer: false,
+    parser: false,
+    typechecker: false,
+    compiler: false,
+    formatter: false,
+    linter: false,
+    vm: false
+};

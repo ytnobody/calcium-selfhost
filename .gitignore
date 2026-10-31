@@ -1,0 +1,13 @@
+# Reference implementation checkout used by the harness
+/.oracle/
+/.oracle-src/
+
+# Compiled bytecode and caches
+*.bone
+.calcium/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp

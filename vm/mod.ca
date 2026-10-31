@@ -1,0 +1,10 @@
+// vm - Bytecode interpreter (SH-4, stretch goal).
+//
+// Not implemented yet. See ../SPEC.md and
+// calcium-lang/specs/selfhost-scope.md for the stage plan and scope.
+
+namespace vm;
+
+// implemented reports whether this component exists yet. The differential
+// harness uses it to decide which comparisons it can run.
+func implemented() = false;
