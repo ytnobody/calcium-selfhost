@@ -125,3 +125,30 @@ for a total function.
 
 The `.bone` format gained opcode 85 (`bone-format.md` §5.1); it is emitted only
 when the final arm can reject, so exhaustive matches are unchanged.
+
+## D10 — A nested match swallowed the enclosing match's arms (**fixed upstream**)
+
+Found while migrating dependent modules after D7. An arm body may contain another
+`match`, but the inner match's case loop only stopped at `;` or EOF, so it also
+consumed the enclosing match's following arms:
+
+```calcium
+func f(x, y) = match x
+    true => match y
+        true => 1
+        false => 2
+    false => 3;        // attached to the *inner* match
+```
+
+The outer match was left with a single `true` arm. Because the final arm used to
+run unconditionally (D7), the mis-parse was invisible: `f(false, true)` silently
+returned a value from the inner match.
+
+Fixed by `fix(parser): don't let a nested match swallow the enclosing match's
+arms`: case parsing is layout-disambiguated. A case indented further left than
+the current match's first case belongs to an enclosing match. The rule only ever
+stops parsing earlier, so previously-correct code is unaffected, and parentheses
+still delimit a nested match where layout cannot.
+
+Relevance to SH-2: the parser will nest `match` heavily, so this had to be
+resolved before writing it — the same reason D7 was decided first.
