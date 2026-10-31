@@ -89,3 +89,30 @@ implementation's native boundary, not in a local workaround.
 time. The intended approach is to build an immutable list of opcode values and
 convert it to bytes once. That conversion has no primitive today; add one to the
 native boundary when SH-3 needs it, rather than adding a general mutable buffer.
+
+## D7 — The final match arm is an implicit catch-all (open, blocks SH-2)
+
+Found while fixing D4. `compileMatch` only emits a conditional jump for
+non-final arms: the final arm's tag check is popped and discarded, so **the
+final arm always runs** whatever its constructor.
+
+```calcium
+match tok
+    Token.Ident(name) => ...
+    Token.Int(n)     => ...
+    Token.Other      => ...   // runs even when tok is Token.Ident
+```
+
+For a parser this is a landmine: the final arm's body runs with unbound payload
+variables (or stale bindings from an earlier attempt), producing silent nonsense
+rather than a diagnostic. The same shape exists for non-constructor patterns.
+
+D4 works around it by rejecting literal payloads in the final arm, but the
+underlying issue — there is no "no arm matched" outcome — is unresolved and
+needs a decision before the parser is written. The likely shape is a new
+appended opcode that raises a runtime error when no arm matched
+(`bone-format.md` is append-only, so this is a compatible addition), plus a
+`-O2`-independent rule that the compiler emits it whenever the final arm is not
+`_`.
+
+Until then: always end a `match` on a `_` arm.
