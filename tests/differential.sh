@@ -105,7 +105,39 @@ have_component() { # have_component <name>
     grep -q 'func implemented() = true' "$ROOT/$1/mod.ca" 2>/dev/null
 }
 
-# --- Stage 1: formatter -------------------------------------------------------
+# --- Stage 1: lexer ----------------------------------------------------------
+# Compared byte for byte: the token stream (kind, literal and byte position) is
+# fully determined by the source.
+
+run_lex() {
+    if ! have_component lexer; then
+        echo "skip lex (lexer not implemented)"
+        skip=$((skip + 1))
+        return 0
+    fi
+    local files f out_oracle out_cand
+    mapfile -t files < <(corpus_files)
+    for f in "${files[@]}"; do
+        out_oracle="$WORK/lex-oracle-$(basename "$f")"
+        out_cand="$WORK/lex-cand-$(basename "$f")"
+
+        if ! "$ORACLE" lex "$f" </dev/null >"$out_oracle" 2>&1; then
+            skip=$((skip + 1))
+            continue
+        fi
+        if ! candidate lex "$f" </dev/null >"$out_cand" 2>&1; then
+            fail_case "lex: $f" "$out_cand"
+            continue
+        fi
+        if diff -u "$out_oracle" "$out_cand" >"$WORK/lex.diff" 2>&1; then
+            pass=$((pass + 1))
+        else
+            fail_case "lex: $f" "$WORK/lex.diff"
+        fi
+    done
+}
+
+# --- Stage 2: formatter -------------------------------------------------------
 # Compared byte-for-byte: a given program has exactly one correct formatting.
 
 run_fmt() {
@@ -114,8 +146,9 @@ run_fmt() {
         skip=$((skip + 1))
         return 0
     fi
-    local f base out_oracle out_cand
-    while IFS= read -r f; do
+    local files f base out_oracle out_cand
+    mapfile -t files < <(corpus_files)
+    for f in "${files[@]}"; do
         base=$(basename "$f")
         out_oracle="$WORK/oracle-$base"
         out_cand="$WORK/cand-$base"
@@ -134,10 +167,10 @@ run_fmt() {
         else
             fail_case "fmt: $f" "$WORK/fmt.diff"
         fi
-    done < <(corpus_files)
+    done
 }
 
-# --- Stage 2: compiler --------------------------------------------------------
+# --- Stage 3: compiler --------------------------------------------------------
 # Behaviour is compared, not bytes: run the oracle's output and the candidate's
 # output and compare stdout, and whether each succeeded.
 
@@ -147,8 +180,9 @@ run_compile() {
         skip=$((skip + 1))
         return 0
     fi
-    local f base bone out_oracle out_cand st_oracle st_cand
-    while IFS= read -r f; do
+    local files f base bone out_oracle out_cand st_oracle st_cand
+    mapfile -t files < <(corpus_files)
+    for f in "${files[@]}"; do
         base=$(basename "$f")
         bone="$WORK/cand-$base.bone"
         out_oracle="$WORK/run-oracle-$base"
@@ -176,7 +210,7 @@ run_compile() {
         else
             fail_case "run: $f" "$WORK/run.diff"
         fi
-    done < <(corpus_files)
+    done
 }
 
 # --- Main ---------------------------------------------------------------------
@@ -187,6 +221,7 @@ echo "corpus:    $CORPUS"
 echo
 
 lint_self || exit 1
+run_lex
 run_fmt
 run_compile
 

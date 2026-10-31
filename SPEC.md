@@ -24,6 +24,10 @@ repository. Do not patch around a spec gap locally.
 | Stage | Deliverable | Done when |
 |---|---|---|
 | SH-2 | lexer → parser → AST → formatter → type checker | the formatter produces byte-identical output to the reference over the corpus |
+
+SH-2 progress: **lexer done** — the token stream is byte-identical to
+`calcium lex` over the whole corpus (`tests/differential.sh` compares it
+per file).
 | SH-3 | compiler emitting `.bone` | programs compiled by the candidate run identically under the reference VM over the corpus |
 | SH-4 | bytecode VM | the candidate VM runs the corpus itself (stretch goal) |
 

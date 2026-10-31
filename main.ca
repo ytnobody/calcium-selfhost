@@ -2,6 +2,7 @@ use core.io!;
 use core.os!;
 use core.string;
 use core.array;
+use lexer;
 
 // calcium-selfhost CLI entry point.
 //
@@ -18,8 +19,8 @@ func usage_lines() = [
     "",
     "commands:",
     "  version                   print the candidate version",
+    "  lex <in>                  dump the token stream",
     "  fmt <in> -o <out>         format <in> into <out>",
-    "  lex <in>                  dump tokens (debugging only)",
     "  parse <in>                dump the AST (debugging only)",
     "  compile <in> -o <out>     compile <in> into <out> (.bone)"
 ];
@@ -33,12 +34,75 @@ func unimplemented(cmd) = do
     os.exit(1)
 end;
 
+// ---------------------------------------------------------------------------
+// lex
+// ---------------------------------------------------------------------------
+
+// lex_escape makes a token literal safe to print on one line. The reference
+// `calcium lex` applies exactly these four rules.
+func lex_escape(s) = match lex_needs_escape(s)
+    true => lex_escape_loop(string.split(s, ""), 0, len(s), "")
+    false => s;
+
+func lex_needs_escape(s) =
+    string.contains(s, "\\") || string.contains(s, "\n") ||
+    string.contains(s, "\t") || string.contains(s, "\r");
+
+func lex_escape_loop(chars, i, n, acc) = match i >= n
+    true => acc
+    false => lex_escape_loop(chars, i + 1, n, concat(acc, lex_escape_one(chars[i])));
+
+func lex_escape_one(c) = match c
+    "\\" => "\\\\"
+    "\n" => "\\n"
+    "\t" => "\\t"
+    "\r" => "\\r"
+    _ => c;
+
+func lex_line(t) = concat(
+    to_string(t.line), ":", to_string(t.column), "\t",
+    t.kind, "\t", lex_escape(t.literal));
+
+// lex_print prints one token and returns the running token count.
+func lex_print(t, n) = do
+    lex_line(t) !> io.say
+    n + 1
+end;
+
+func lex_dump(toks, n) = match lexer.first(toks)
+    Maybe.None => n
+    Maybe.Some(t) => lex_dump(lexer.rest(toks), lex_print(t, n));
+
+func lex_file(path) = match io.exists(path)
+    false => lex_missing(path)
+    true => lex_run(path);
+
+func lex_missing(path) = do
+    concat("calcium-selfhost: cannot read ", path) !> io.say
+    os.exit(1)
+end;
+
+func lex_run(path) = do
+    src = io.read_file(path) !? {
+        success(v) => v
+        failure(e) => ""
+    }
+    toks = lexer.tokenize(src)
+    n = lex_dump(toks, 0)
+    concat("# tokens: ", to_string(n)) !> io.say
+end;
+
+// ---------------------------------------------------------------------------
+// dispatch
+// ---------------------------------------------------------------------------
+
 args = os.args();
 
 // argv is [interpreter, main.ca, command, ...] so the command is at index 2.
 // Literal payload patterns keep the dispatch readable.
 match get(args, 2)
     Maybe.Some("version") => concat("calcium-selfhost ", version()) !> io.say
+    Maybe.Some("lex") => lex_file(get(args, 3, ""))
     Maybe.Some("help") => usage() !> io.say
     Maybe.Some(cmd) => unimplemented(cmd)
     Maybe.None => do

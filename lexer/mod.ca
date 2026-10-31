@@ -1,10 +1,668 @@
-// lexer - Source text to tokens (SH-2).
+// lexer - turns Calcium source text into tokens.
 //
-// Not implemented yet. See ../SPEC.md and
-// calcium-lang/specs/selfhost-scope.md for the stage plan and scope.
+// This is a functional reimplementation of the reference lexer: no mutable
+// state, so the scan position, line and column are threaded explicitly.
+//
+// Scanning is byte-oriented, exactly like the reference implementation: source
+// positions are byte columns, and string literals are byte slices. Runes would
+// give different columns for non-ASCII text, so the scanner works on the byte
+// array and rebuilds text with core.bytes.
 
 namespace lexer;
 
-// implemented reports whether this component exists yet. The differential
-// harness uses it to decide which comparisons it can run.
-func implemented() = false;
+use core.string;
+use core.array;
+use core.bytes;
+use lexer.token;
+
+// ---------------------------------------------------------------------------
+// Token stream
+//
+// A linked list, not an array: appending to a Calcium array copies it, which
+// would make lexing quadratic. The scanner prepends while moving forward, so
+// the result is reversed once at the end.
+// ---------------------------------------------------------------------------
+
+// implemented reports to the differential harness whether this component exists.
+func implemented() = true;
+
+type Tokens = TokNil | TokCons(tok, rest);
+
+func reverse(list, acc) = match list
+    TokNil => acc
+    TokCons(t, rest) => reverse(rest, TokCons(t, acc));
+
+// Accessors, so consumers outside this module do not need to name the list
+// constructors. (Qualified constructor patterns require an upper-case
+// namespace, and `lexer` is not upper-case.)
+func first(list) = match list
+    TokNil => Maybe.None
+    TokCons(t, rest) => Maybe.Some(t);
+
+func rest(list) = match list
+    TokNil => TokNil
+    TokCons(t, r) => r;
+
+// ---------------------------------------------------------------------------
+// Bytes
+// ---------------------------------------------------------------------------
+
+_NUL = 0;
+_TAB = 9;
+_NL = 10;
+_CR = 13;
+_SPACE = 32;
+_BANG = 33;
+_DQUOTE = 34;
+_DOLLAR = 36;
+_AMP = 38;
+_SQUOTE = 39;
+_STAR = 42;
+_COMMA = 44;
+_DOT = 46;
+_SLASH = 47;
+_ZERO = 48;
+_NINE = 57;
+_SEMI = 59;
+_EQ = 61;
+_LBRACKET = 91;
+_BACKSLASH = 92;
+_RBRACKET = 93;
+_UNDERSCORE = 95;
+_LBRACE = 123;
+_PIPE = 124;
+_RBRACE = 125;
+
+// at returns the byte at index i, or -1 past either end.
+func at(bs, i) = match i >= 0 && i < len(bs)
+    true => bs[i]
+    false => -1;
+
+func is_letter(c) = (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == _UNDERSCORE;
+func is_digit(c) = c >= _ZERO && c <= _NINE;
+func is_hex(c) = is_digit(c) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102);
+func is_space(c) = c == _SPACE || c == _TAB || c == _NL || c == _CR;
+
+// sub rebuilds the text between two byte offsets, clamped to the input.
+func sub(bs, start, stop) = sub_clamped(bs, clamp_start(start), clamp_end(stop, len(bs)));
+
+func clamp_start(s) = match s < 0
+    true => 0
+    false => s;
+
+func clamp_end(e, n) = match e > n
+    true => n
+    false => e;
+
+func sub_clamped(bs, s, e) = match e <= s
+    true => ""
+    false => bytes.from_bytes(array.slice(bs, s, e));
+
+// one_byte rebuilds a single byte as text. Bytes are copied verbatim, so a run
+// of one-byte strings reassembles multi-byte UTF-8 sequences.
+func one_byte(b) = bytes.from_bytes([b]);
+
+func starts_with_at(bs, i, text) = sub(bs, i, i + len(text)) == text;
+
+// ---------------------------------------------------------------------------
+// Scanner state
+//
+// i      byte offset of the current byte
+// line   1-based line of the current byte
+// col    byte column of the current byte; 0 for a newline itself
+// prev   the previous token's kind, for regex/division disambiguation
+// interp inside a string interpolation (${ ... })
+// depth  brace depth inside that interpolation
+// ---------------------------------------------------------------------------
+
+func st(i, line, col) = {i: i, line: line, col: col, prev: "", interp: false, depth: 0};
+
+// step advances one byte, updating line and column exactly as the reference
+// lexer's readChar does: a newline takes column 0 and bumps the line, every
+// other byte increments the column.
+func step(bs, s) = _step(bs, s.i + 1, s.line, s.col, s);
+
+func _step(bs, next, line, col, s) = match at(bs, next) == _NL
+    true => {i: next, line: line + 1, col: 0, prev: s.prev, interp: s.interp, depth: s.depth}
+    false => {i: next, line: line, col: col + 1, prev: s.prev, interp: s.interp, depth: s.depth};
+
+func adv(bs, s, k) = match k <= 0
+    true => s
+    false => adv(bs, step(bs, s), k - 1);
+
+// initial computes the state for the first byte. New() reads one byte before the
+// first NextToken, so a leading newline is already consumed.
+func initial(bs) = match at(bs, 0) == _NL
+    true => {i: 0, line: 2, col: 0, prev: "", interp: false, depth: 0}
+    false => {i: 0, line: 1, col: 1, prev: "", interp: false, depth: 0};
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+func tokenize(input) = tokenize_bytes(bytes.to_bytes(input));
+
+func tokenize_bytes(bs) = reverse(scan(bs, initial(bs), TokNil), TokNil);
+
+// scan produces tokens in reverse order, ending with EOF.
+func scan(bs, s, acc) = do
+    s2 = skip_trivia(bs, s)
+    r = lex_one(bs, s2)
+    acc2 = TokCons(r.tok, acc)
+    more = !token.is_eof(r.tok)
+    match more
+        true => scan(bs, r.st, acc2)
+        false => acc2
+end;
+
+// ---------------------------------------------------------------------------
+// Whitespace and comments
+// ---------------------------------------------------------------------------
+
+func skip_trivia(bs, s) = skip_after_spaces(bs, skip_spaces(bs, s));
+
+func skip_spaces(bs, s) = match is_space(at(bs, s.i))
+    true => skip_spaces(bs, step(bs, s))
+    false => s;
+
+func skip_after_spaces(bs, s) = match comment_kind(bs, s)
+    "line" => skip_trivia(bs, skip_line_comment(bs, s))
+    "block" => skip_trivia(bs, skip_block_comment(bs, s))
+    _ => s;
+
+func comment_kind(bs, s) = match at(bs, s.i) == _SLASH && at(bs, s.i + 1) == _SLASH
+    true => "line"
+    false => comment_kind_2(bs, s);
+
+func comment_kind_2(bs, s) = match at(bs, s.i) == _SLASH && at(bs, s.i + 1) == _STAR
+    true => "block"
+    false => "";
+
+// skip_line_comment stops on the newline, which the next skip_spaces consumes.
+func skip_line_comment(bs, s) = match at(bs, s.i) == _NL || at(bs, s.i) < 0
+    true => s
+    false => skip_line_comment(bs, step(bs, s));
+
+func skip_block_comment(bs, s) = skip_block(bs, adv(bs, s, 2));
+
+func skip_block(bs, s) = match at(bs, s.i) < 0
+    true => s
+    false => skip_block_2(bs, s);
+
+func skip_block_2(bs, s) = match at(bs, s.i) == _STAR && at(bs, s.i + 1) == _SLASH
+    true => adv(bs, s, 2)
+    false => skip_block(bs, step(bs, s));
+
+// ---------------------------------------------------------------------------
+// One token
+// ---------------------------------------------------------------------------
+
+func lex_one(bs, s) = match at(bs, s.i) < 0
+    true => result(token.eof(s.line, s.col), s)
+    false => lex_dispatch(bs, s);
+
+func lex_dispatch(bs, s) = match is_letter(at(bs, s.i))
+    true => lex_word(bs, s)
+    false => lex_not_letter(bs, s);
+
+func lex_not_letter(bs, s) = match is_digit(at(bs, s.i))
+    true => lex_number(bs, s)
+    false => lex_punct(bs, s);
+
+func lex_punct(bs, s) = match at(bs, s.i) == _DQUOTE
+    true => lex_double_quote(bs, s)
+    false => lex_punct_2(bs, s);
+
+func lex_punct_2(bs, s) = match at(bs, s.i) == _SQUOTE
+    true => lex_single_quote(bs, s)
+    false => lex_punct_3(bs, s);
+
+func lex_punct_3(bs, s) = match at(bs, s.i) == _SLASH
+    true => lex_slash(bs, s)
+    false => lex_punct_4(bs, s);
+
+func lex_punct_4(bs, s) = match at(bs, s.i) == _LBRACE
+    true => lex_lbrace(bs, s)
+    false => lex_punct_5(bs, s);
+
+func lex_punct_5(bs, s) = match at(bs, s.i) == _RBRACE
+    true => lex_rbrace(bs, s)
+    false => lex_operator(bs, s);
+
+func result(tok, s) = {tok: tok, st: s};
+
+func set_prev(s, kind) = {i: s.i, line: s.line, col: s.col, prev: kind, interp: s.interp, depth: s.depth};
+
+func set_interp(s, interp, depth) = {i: s.i, line: s.line, col: s.col, prev: s.prev, interp: interp, depth: depth};
+
+// ---------------------------------------------------------------------------
+// Identifiers and keywords
+// ---------------------------------------------------------------------------
+
+func lex_word(bs, s) = do
+    stop = word_end(bs, s.i)
+    text = sub(bs, s.i, stop)
+    next = adv(bs, s, stop - s.i)
+    kind = match text == "_"
+        true => "_"
+        false => token.keyword_kind(text)
+    match text == "func" && at(bs, stop) == _BANG
+        true => result(token.make("FUNC!", "func!", s.line, s.col), set_prev(adv(bs, next, 1), "FUNC!"))
+        false => result(token.make(kind, text, s.line, s.col), set_prev(next, kind))
+end;
+
+func word_end(bs, i) = match is_letter(at(bs, i)) || is_digit(at(bs, i))
+    true => word_end(bs, i + 1)
+    false => i;
+
+// ---------------------------------------------------------------------------
+// Numbers
+// ---------------------------------------------------------------------------
+
+func lex_number(bs, s) = match at(bs, s.i) == _ZERO
+    true => lex_number_zero(bs, s)
+    false => lex_decimal(bs, s);
+
+func lex_number_zero(bs, s) = match at(bs, s.i + 1) == 120 || at(bs, s.i + 1) == 88
+    true => finish_kind(bs, s, hex_end(bs, s.i + 2), "INT")
+    false => lex_number_zero_b(bs, s);
+
+func lex_number_zero_b(bs, s) = match at(bs, s.i + 1) == 98 || at(bs, s.i + 1) == 66
+    true => finish_kind(bs, s, bin_end(bs, s.i + 2), "INT")
+    false => lex_decimal(bs, s);
+
+func hex_end(bs, i) = match is_hex(at(bs, i)) || at(bs, i) == _UNDERSCORE
+    true => hex_end(bs, i + 1)
+    false => i;
+
+func bin_end(bs, i) = match at(bs, i) == 48 || at(bs, i) == 49 || at(bs, i) == _UNDERSCORE
+    true => bin_end(bs, i + 1)
+    false => i;
+
+func digest_end(bs, i) = match is_digit(at(bs, i)) || at(bs, i) == _UNDERSCORE
+    true => digest_end(bs, i + 1)
+    false => i;
+
+// lex_decimal scans digits, an optional fractional part and an optional
+// exponent, exactly as the reference lexer does.
+func lex_decimal(bs, s) = do
+    int_end = digest_end(bs, s.i)
+    frac_end = fraction_end(bs, int_end)
+    exp_end = exp_part_end(bs, frac_end)
+    kind = match frac_end != int_end || exp_end != frac_end
+        true => "FLOAT"
+        false => "INT"
+    finish_kind(bs, s, exp_end, kind)
+end;
+
+func fraction_end(bs, i) = match at(bs, i) == _DOT && is_digit(at(bs, i + 1))
+    true => digest_end(bs, i + 1)
+    false => i;
+
+func exp_part_end(bs, i) = match at(bs, i) == 101 || at(bs, i) == 69
+    true => exp_digits_end(bs, exp_sign_end(bs, i + 1))
+    false => i;
+
+func exp_sign_end(bs, i) = match at(bs, i) == 43 || at(bs, i) == 45
+    true => i + 1
+    false => i;
+
+func exp_digits_end(bs, i) = match is_digit(at(bs, i))
+    true => exp_digits_end(bs, i + 1)
+    false => i;
+
+func finish_kind(bs, s, stop, kind) = do
+    text = sub(bs, s.i, stop)
+    next = set_prev(adv(bs, s, stop - s.i), kind)
+    result(token.make(kind, text, s.line, s.col), next)
+end;
+
+// ---------------------------------------------------------------------------
+// Strings
+// ---------------------------------------------------------------------------
+
+func lex_double_quote(bs, s) = match at(bs, s.i + 1) == _DQUOTE && at(bs, s.i + 2) == _DQUOTE
+    true => lex_heredoc(bs, s)
+    false => lex_double_quote_2(bs, s);
+
+func lex_double_quote_2(bs, s) = match string_has_interpolation(bs, s.i + 1)
+    true => lex_template_start(bs, s)
+    false => lex_plain_string(bs, s);
+
+// lex_plain_string scans "..."; the literal is the content between the quotes
+// with escapes resolved.
+func lex_plain_string(bs, s) = do
+    stop = string_body_end(bs, s.i + 1, _DQUOTE)
+    next = set_prev(adv(bs, s, stop - s.i + 1), "STRING")
+    result(token.make("STRING", unescape(bs, s.i + 1, stop), s.line, s.col), next)
+end;
+
+func lex_single_quote(bs, s) = do
+    stop = string_body_end(bs, s.i + 1, _SQUOTE)
+    next = set_prev(adv(bs, s, stop - s.i + 1), "STRING")
+    result(token.make("STRING", unescape(bs, s.i + 1, stop), s.line, s.col), next)
+end;
+
+// string_body_end returns the offset of the closing quote (or EOF).
+func string_body_end(bs, i, quote) = match at(bs, i) == quote || at(bs, i) < 0
+    true => i
+    false => string_body_skip(bs, i, quote);
+
+func string_body_skip(bs, i, quote) = match at(bs, i) == _BACKSLASH
+    true => string_body_end(bs, i + 2, quote)
+    false => string_body_end(bs, i + 1, quote);
+
+// string_has_interpolation reports whether a ${ appears before the closing
+// quote.
+func string_has_interpolation(bs, i) = match at(bs, i) == _DQUOTE || at(bs, i) < 0
+    true => false
+    false => string_has_interpolation_2(bs, i);
+
+func string_has_interpolation_2(bs, i) = match at(bs, i) == _BACKSLASH
+    true => string_has_interpolation(bs, i + 2)
+    false => string_has_interpolation_3(bs, i);
+
+func string_has_interpolation_3(bs, i) = match at(bs, i) == _DOLLAR && at(bs, i + 1) == _LBRACE
+    true => true
+    false => string_has_interpolation(bs, i + 1);
+
+// Heredoc: """...""" ; content is literal, a leading newline and a trailing
+// newline are stripped.
+func lex_heredoc(bs, s) = do
+    start = heredoc_start(bs, s.i + 3)
+    stop = heredoc_end(bs, start)
+    body = strip_trailing_newline(sub(bs, start, stop))
+    next = set_prev(adv(bs, s, stop - s.i + 3), "STRING")
+    result(token.make("STRING", body, s.line, s.col), next)
+end;
+
+func heredoc_start(bs, i) = match at(bs, i) == _NL
+    true => i + 1
+    false => heredoc_start_crlf(bs, i);
+
+func heredoc_start_crlf(bs, i) = match at(bs, i) == _CR && at(bs, i + 1) == _NL
+    true => i + 2
+    false => i;
+
+func heredoc_end(bs, i) = match at(bs, i) < 0
+    true => i
+    false => heredoc_end_2(bs, i);
+
+func heredoc_end_2(bs, i) = match at(bs, i) == _DQUOTE && at(bs, i + 1) == _DQUOTE && at(bs, i + 2) == _DQUOTE
+    true => i
+    false => heredoc_end(bs, i + 1);
+
+func strip_trailing_newline(s) = match string.ends_with(s, "\r\n")
+    true => string.substring(s, 0, len(s) - 2)
+    false => strip_trailing_lf(s);
+
+func strip_trailing_lf(s) = match string.ends_with(s, "\n")
+    true => string.substring(s, 0, len(s) - 1)
+    false => s;
+
+// ---------------------------------------------------------------------------
+// String interpolation
+//
+// A string containing ${ is split into STRING_TEMPLATE_START, then the
+// expression tokens, then '}' which resumes the string as
+// STRING_TEMPLATE_MIDDLE (another ${ follows) or STRING_TEMPLATE_END.
+// ---------------------------------------------------------------------------
+
+func lex_template_start(bs, s) = do
+    stop = template_marker(bs, s.i + 1)
+    next = adv(bs, set_interp(s, true, 0), stop - s.i + 2)
+    result(token.make("STRING_TEMPLATE_START", unescape(bs, s.i + 1, stop), s.line, s.col), set_prev(next, "STRING_TEMPLATE_START"))
+end;
+
+// template_marker returns the offset of the "${" that starts the interpolation.
+func template_marker(bs, i) = match at(bs, i) == _DOLLAR && at(bs, i + 1) == _LBRACE
+    true => i
+    false => template_marker_2(bs, i);
+
+func template_marker_2(bs, i) = match at(bs, i) == _BACKSLASH
+    true => template_marker(bs, i + 2)
+    false => template_marker(bs, i + 1);
+
+func lex_lbrace(bs, s) = match s.interp
+    true => finish_build(bs, s, "{", set_interp(s, true, s.depth + 1))
+    false => finish_build(bs, s, "{", s);
+
+func lex_rbrace(bs, s) = match s.interp && s.depth == 0
+    true => lex_template_part(bs, s)
+    false => lex_rbrace_nested(bs, s);
+
+func lex_rbrace_nested(bs, s) = match s.interp
+    true => finish_build(bs, s, "}", set_interp(s, true, s.depth - 1))
+    false => finish_build(bs, s, "}", s);
+
+// lex_template_part resumes the string after the interpolated expression.
+func lex_template_part(bs, s) = do
+    start = s.i + 1
+    stop = template_part_end(bs, start)
+    more = at(bs, stop) == _DOLLAR
+    consume = match more
+        true => stop - s.i + 2
+        false => stop - s.i + 1
+    kind = match more
+        true => "STRING_TEMPLATE_MIDDLE"
+        false => "STRING_TEMPLATE_END"
+    next = set_prev(adv(bs, set_interp(s, more, 0), consume), kind)
+    result(token.make(kind, unescape(bs, start, stop), s.line, s.col), next)
+end;
+
+func template_part_end(bs, i) = match at(bs, i) < 0 || at(bs, i) == _DQUOTE
+    true => i
+    false => template_part_end_2(bs, i);
+
+func template_part_end_2(bs, i) = match at(bs, i) == _BACKSLASH
+    true => template_part_end(bs, i + 2)
+    false => template_part_end_3(bs, i);
+
+func template_part_end_3(bs, i) = match at(bs, i) == _DOLLAR && at(bs, i + 1) == _LBRACE
+    true => i
+    false => template_part_end(bs, i + 1);
+
+// ---------------------------------------------------------------------------
+// Escapes
+// ---------------------------------------------------------------------------
+
+// unescape resolves backslash escapes in bytes[start, stop).
+func unescape(bs, start, stop) = match has_backslash(bs, start, stop)
+    true => unescape_loop(bs, start, stop, "")
+    false => sub(bs, start, stop);
+
+func has_backslash(bs, i, stop) = match i >= stop
+    true => false
+    false => has_backslash_2(bs, i, stop);
+
+func has_backslash_2(bs, i, stop) = match at(bs, i) == _BACKSLASH
+    true => true
+    false => has_backslash(bs, i + 1, stop);
+
+func has_backslash_in_text(s, i, n) = match i >= n
+    true => false
+    false => has_backslash_in_text_2(s, i, n);
+
+func has_backslash_in_text_2(s, i, n) = match string.char_at(s, i)
+    Maybe.Some("\\") => true
+    _ => has_backslash_in_text(s, i + 1, n);
+
+func unescape_loop(bs, i, stop, acc) = match i >= stop
+    true => acc
+    false => unescape_step(bs, i, stop, acc);
+
+func unescape_step(bs, i, stop, acc) = match at(bs, i) == _BACKSLASH && i + 1 < stop
+    true => unescape_escape(bs, i, stop, acc)
+    false => unescape_loop(bs, i + 1, stop, concat(acc, one_byte(at(bs, i))));
+
+func unescape_escape(bs, i, stop, acc) = unescape_simple(bs, i, stop, acc, simple_escape(at(bs, i + 1)));
+
+func unescape_simple(bs, i, stop, acc, decoded) = match decoded != ""
+    true => unescape_loop(bs, i + 2, stop, concat(acc, decoded))
+    false => unescape_unicode(bs, i, stop, acc);
+
+func simple_escape(c) = match c
+    110 => "\n"
+    114 => "\r"
+    116 => "\t"
+    98 => "\b"
+    102 => "\f"
+    92 => "\\"
+    34 => "\""
+    39 => "'"
+    _ => "";
+
+// unescape_unicode handles \uXXXX. Invalid escapes keep the backslash, matching
+// the reference: the escaped character is then emitted normally.
+func unescape_unicode(bs, i, stop, acc) = match at(bs, i + 1) == 117 && i + 5 < stop
+    true => unescape_unicode_value(bs, i, stop, acc, hex4(bs, i + 2))
+    false => unescape_keep_backslash(bs, i, stop, acc);
+
+func unescape_unicode_value(bs, i, stop, acc, cp) = match cp < 0
+    true => unescape_keep_backslash(bs, i, stop, acc)
+    false => unescape_unicode_surrogate(bs, i, stop, acc, cp);
+
+func unescape_unicode_surrogate(bs, i, stop, acc, cp) = match cp >= 55296 && cp <= 56319
+    true => unescape_high_surrogate(bs, i, stop, acc, cp)
+    false => unescape_unicode_low(bs, i, stop, acc, cp);
+
+// A lone low surrogate is not a scalar value; keep the escape as source text.
+func unescape_unicode_low(bs, i, stop, acc, cp) = match cp >= 56320 && cp <= 57343
+    true => unescape_keep_backslash(bs, i, stop, acc)
+    false => unescape_loop(bs, i + 6, stop, concat(acc, from_code(cp)));
+
+func unescape_high_surrogate(bs, i, stop, acc, cp) = match at(bs, i + 6) == _BACKSLASH && at(bs, i + 7) == 117 && i + 11 < stop
+    true => unescape_high_pair(bs, i, stop, acc, cp, hex4(bs, i + 8))
+    false => unescape_keep_backslash(bs, i, stop, acc);
+
+func unescape_high_pair(bs, i, stop, acc, hi, lo) = match lo >= 56320 && lo <= 57343
+    true => unescape_loop(bs, i + 12, stop, concat(acc, from_code(65536 + (hi - 55296) * 1024 + (lo - 56320))))
+    false => unescape_keep_backslash(bs, i, stop, acc);
+
+func unescape_keep_backslash(bs, i, stop, acc) = unescape_loop(bs, i + 1, stop, concat(acc, "\\"));
+
+func from_code(cp) = string.from_code(cp) !? {
+    success(v) => v
+    failure(e) => ""
+};
+
+// hex4 parses exactly four hex digits, returning -1 when they are not hex.
+func hex4(bs, i) = hex4_of(hex_digit(at(bs, i)), hex_digit(at(bs, i + 1)), hex_digit(at(bs, i + 2)), hex_digit(at(bs, i + 3)));
+
+func hex_digit(c) = match is_hex(c)
+    true => hex_digit_value(c)
+    false => -1;
+
+func hex_digit_value(c) = match c <= 57
+    true => c - _ZERO
+    false => hex_digit_alpha(c);
+
+func hex_digit_alpha(c) = match c >= 97
+    true => c - 87
+    false => c - 55;
+
+func hex4_of(a, b, c, d) = match a < 0 || b < 0 || c < 0 || d < 0
+    true => -1
+    false => a * 4096 + b * 256 + c * 16 + d;
+
+// ---------------------------------------------------------------------------
+// Regex
+// ---------------------------------------------------------------------------
+
+func lex_slash(bs, s) = match is_regex_context(s.prev)
+    true => lex_regex(bs, s)
+    false => finish_build(bs, s, "/", s);
+
+// After a value, '/' is division; anywhere else it starts a regex literal.
+func is_regex_context(prev) = match prev
+    "IDENT" => false
+    "INT" => false
+    "FLOAT" => false
+    "STRING" => false
+    "REGEX" => false
+    ")" => false
+    "]" => false
+    "}" => false
+    "TRUE" => false
+    "FALSE" => false
+    "_" => false
+    _ => true;
+
+func lex_regex(bs, s) = do
+    stop = regex_end(bs, s.i + 1)
+    flag_end = regex_flags_end(bs, regex_after_body(bs, stop))
+    text = sub(bs, s.i, flag_end)
+    next = set_prev(adv(bs, s, flag_end - s.i), "REGEX")
+    result(token.make("REGEX", text, s.line, s.col), next)
+end;
+
+// regex_after_body skips the closing slash when the literal is terminated.
+func regex_after_body(bs, i) = match at(bs, i) == _SLASH
+    true => i + 1
+    false => i;
+
+func regex_end(bs, i) = match at(bs, i) < 0 || at(bs, i) == _SLASH
+    true => i
+    false => regex_end_2(bs, i);
+
+func regex_end_2(bs, i) = match at(bs, i) == _BACKSLASH
+    true => regex_end(bs, i + 2)
+    false => regex_end(bs, i + 1);
+
+func regex_flags_end(bs, i) = match at(bs, i) == 105 || at(bs, i) == 109 || at(bs, i) == 115 || at(bs, i) == 103
+    true => regex_flags_end(bs, i + 1)
+    false => i;
+
+// ---------------------------------------------------------------------------
+// Operators and punctuation
+//
+// The kind of an operator token is its own text, so the table is just the set of
+// spellings, longest first, grouped by first byte to bound the search.
+// ---------------------------------------------------------------------------
+
+func ops_for(c) = match c
+    _BANG => ["!!!>", "!=", "!>", "!?", "!"]
+    _PIPE => ["|>?", "||", "|>", "|"]
+    _DOT => ["...", "."]
+    _STAR => ["**", "*"]
+    _EQ => ["==", "=>", "="]
+    60 => ["<=", "<<", "<"]
+    62 => [">=", ">>", ">"]
+    _AMP => ["&&", "&"]
+    _UNDERSCORE => ["_"]
+    _LBRACKET => ["["]
+    _RBRACKET => ["]"]
+    40 => ["("]
+    41 => [")"]
+    43 => ["+"]
+    45 => ["-"]
+    37 => ["%"]
+    94 => ["^"]
+    126 => ["~"]
+    63 => ["?"]
+    _COMMA => [","]
+    _SEMI => [";"]
+    58 => [":"]
+    _ => [];
+
+func lex_operator(bs, s) = do
+    text = match_op(bs, s.i, ops_for(at(bs, s.i)), 0)
+    finish_build(bs, s, text, s)
+end;
+
+func match_op(bs, i, ops, k) = match k >= len(ops)
+    true => ""
+    false => match_op_1(bs, i, ops, k);
+
+func match_op_1(bs, i, ops, k) = match starts_with_at(bs, i, ops[k])
+    true => ops[k]
+    false => match_op(bs, i, ops, k + 1);
+
+// finish_build consumes the matched text (or one byte when nothing matched) and
+// produces the token.
+// An unmatched byte becomes ILLEGAL. The reference builds its literal with
+// string(byte), which converts the byte *value* to a code point rather than
+// copying the byte, so a stray 0xE3 reports U+00E3 and not invalid UTF-8.
+func finish_build(bs, s, text, next) = match text == ""
+    true => result(token.make("ILLEGAL", from_code(at(bs, s.i)), s.line, s.col), set_prev(adv(bs, s, 1), "ILLEGAL"))
+    false => result(token.make(text, text, s.line, s.col), set_prev(adv(bs, next, len(text)), text));

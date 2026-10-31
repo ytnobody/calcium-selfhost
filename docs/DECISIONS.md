@@ -152,3 +152,31 @@ still delimit a nested match where layout cannot.
 
 Relevance to SH-2: the parser will nest `match` heavily, so this had to be
 resolved before writing it — the same reason D7 was decided first.
+
+## D11 — Writing a parser in Calcium: three ergonomics limits (open, SH-2)
+
+Discovered while writing the lexer. None blocks the lexer, but each will shape
+the parser and is cheap to fix now.
+
+1. **A `match` cannot be delimited inside parentheses or as an argument.** Case
+   parsing stops only at `;`, EOF or a shallower column, so
+   `f(match x a => 1 b => 2)` is a parse error, and
+   `(match x a => 1 b => 2)` likewise unless a `;` or `)` newline happens to be
+   at a shallower column. Workaround used in the lexer: extract a named helper
+   function. A `match ... end` form would remove the ambiguity entirely.
+
+2. **Nested `do` blocks need their own `end`, and the diagnostic is poor.**
+   Forgetting an inner `end` produced `expected identifier before '=>'` followed
+   by `unexpected end of file inside do block`, pointing away from the mistake.
+
+3. **Cross-module ADT destructuring requires an upper-case namespace.** A
+   qualified constructor pattern is only recognised when both the namespace and
+   the constructor start with an upper-case letter (`Maybe.Some`), because the
+   parser keys on `isUpperCase`. `lexer.TokCons(t, rest)` therefore parses as a
+   member access, not a pattern, and binds nothing. Workaround: the module
+   exposes `first`/`rest` accessors returning `Maybe`, and consumers match on
+   `Maybe.Some`. Either the case rule should be relaxed to "the token after the
+   dot is upper-case", or namespaces should be upper-case by convention.
+
+The lexer itself needed none of these fixes: it is a pure function returning a
+token list, with the list kept opaque to `main.ca`.

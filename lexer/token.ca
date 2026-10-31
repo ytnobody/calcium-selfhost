@@ -1,0 +1,64 @@
+// token - lexical token representation.
+//
+// A token is a hash with four keys:
+//
+//   kind     the token type as a string, using the same spelling as the
+//            reference implementation's token.TokenType (e.g. "IDENT", "INT",
+//            "=", "=>", "FUNC"). Keeping the spelling identical makes `lex`
+//            dumps directly comparable.
+//   literal  the token text. For strings this is the processed value (escapes
+//            resolved), matching the reference lexer.
+//   line     1-based line of the token's first character
+//   column   1-based byte column of the token's first character
+//
+// Positions are byte columns, not rune columns: the reference lexer walks bytes.
+
+namespace token;
+
+// make builds a token.
+func make(kind, literal, line, column) = {
+    kind: kind,
+    literal: literal,
+    line: line,
+    column: column
+};
+
+// eof builds the end-of-input token.
+func eof(line, column) = make("EOF", "", line, column);
+
+// is_eof reports whether a token is the end-of-input marker.
+func is_eof(t) = t.kind == "EOF";
+
+// KEYWORDS are the reserved words. "func!" is not here: it is lexed as the
+// identifier "func" immediately followed by '!'. "end" is deliberately absent:
+// it is a contextual word, lexed as an identifier.
+func keyword_kind(word) = match word
+    "func" => "FUNC"
+    "match" => "MATCH"
+    "constraint" => "CONSTRAINT"
+    "namespace" => "NAMESPACE"
+    "use" => "USE"
+    "true" => "TRUE"
+    "false" => "FALSE"
+    "success" => "SUCCESS"
+    "failure" => "FAILURE"
+    "return" => "RETURN"
+    "in" => "IN"
+    "do" => "DO"
+    "type" => "TYPE"
+    "map" => "MAP"
+    "filter" => "FILTER"
+    "reduce" => "REDUCE"
+    "has" => "HAS"
+    "keys" => "KEYS"
+    "values" => "VALUES"
+    "hash" => "HASH"
+    "len" => "LEN"
+    _ => "IDENT";
+
+// keywords returns every reserved word, for diagnostics and tests.
+func keywords() = [
+    "func", "match", "constraint", "namespace", "use", "true", "false",
+    "success", "failure", "return", "in", "do", "type", "map", "filter",
+    "reduce", "has", "keys", "values", "hash", "len"
+];

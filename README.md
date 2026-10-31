@@ -2,8 +2,8 @@
 
 A from-scratch reimplementation of the Calcium toolchain in Calcium itself.
 
-**Status: scaffold only.** Nothing is implemented yet. See `SPEC.md` for the
-stage plan.
+**Status: lexer implemented.** The token stream matches the reference
+byte for byte over the differential corpus. See `SPEC.md` for the stage plan.
 
 The Go implementation in [`calcium-lang`](https://github.com/ytnobody/calcium-lang)
 is the **reference implementation** and the source of truth for the language
@@ -25,7 +25,8 @@ drift.
 
 | Component | Stage |
 |---|---|
-| lexer, parser, AST, type checker | SH-2 |
+| lexer | SH-2, done |
+| parser, AST, type checker | SH-2 |
 | compiler (emits `.bone`) | SH-3 |
 | formatter | SH-2 |
 | linter | SH-3 |
