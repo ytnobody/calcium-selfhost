@@ -38,21 +38,22 @@ into scope.
 
 ---
 
-## D4 — ADT patterns silently treat literal payloads as bindings (open, blocks SH-2)
+## D4 — ADT patterns silently treat literal payloads as bindings (**fixed upstream**)
 
-Found while writing `main.ca`. A constructor pattern treats *every* field token
-as a binding name, so a literal payload becomes a variable instead of a value to
-match against:
+Found while writing `main.ca`, fixed in `calcium-lang` by
+`feat(lang): match literal payloads in constructor patterns`.
+
+A constructor pattern used to treat *every* field token as a binding name, so a
+literal payload became a variable instead of a value to match against:
 
 ```calcium
 match Maybe.Some(99)
-    Maybe.Some(5) => "matched"   // matches! `5` is a binding, not a literal
+    Maybe.Some(5) => "matched"   // matched! `5` was a binding, not a literal
     _ => "other"
 ```
 
-The same arm also matches `Maybe.Some(42)`, `Maybe.Some("x")`, in fact any
-single-payload constructor. Because the binding is silent, the only *visible*
-failure is when the literal happens to collide with an existing name:
+Numeric and string payloads could not be matched at all, and the only visible
+symptom was a name collision:
 
 ```calcium
 match get(args, 2)
@@ -61,18 +62,16 @@ match get(args, 2)
 // `version` was shadowed by a binding holding the string "version"
 ```
 
-So ADT patterns support *binding* payloads only, never *matching* them — a hard
-limitation for the parser, where token kinds, operators and names are natural
-literal payloads. Fix belongs in `calcium-lang` (parser: keep the field as an
-expression and compare when it is a literal; compiler: only `Define` when the
-field is an identifier).
+A payload position is now a binding name, `_`, or a literal matched by value;
+anything else is a parse error. A literal payload in the final arm is rejected
+at compile time, because the final arm is the catch-all and the comparison could
+never reject it.
 
-Workaround used today: bind with `Maybe.Some(v)`, then match `v` against string
-literals in a second `match`.
+Still open from the same area: a bare identifier in a match arm is compiled as an
+expression to compare, not as a catch-all binding, so there is no "bind the rest"
+pattern. Use `_` and read the value from an outer variable.
 
-Related limitation found at the same time: a bare identifier in a match arm is
-compiled as an expression to compare, not as a catch-all binding, so there is no
-"bind the rest" pattern. Use `_` and read the value from an outer variable.
+`main.ca` now uses the natural form for command dispatch.
 
 ## D5 — `hash_set` is O(n) (accepted, revisit at SH-3)
 

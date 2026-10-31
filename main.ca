@@ -21,9 +21,7 @@ func usage_lines() = [
     "  fmt <in> -o <out>         format <in> into <out>",
     "  lex <in>                  dump tokens (debugging only)",
     "  parse <in>                dump the AST (debugging only)",
-    "  compile <in> -o <out>     compile <in> into <out> (.bone)",
-    "",
-    "Nothing is implemented yet; see SPEC.md for the stage plan."
+    "  compile <in> -o <out>     compile <in> into <out> (.bone)"
 ];
 
 func usage() = string.join(usage_lines(), "\n");
@@ -38,12 +36,12 @@ end;
 args = os.args();
 
 // argv is [interpreter, main.ca, command, ...] so the command is at index 2.
-cmd = match get(args, 2)
-    Maybe.Some(v) => v
-    Maybe.None => "";
-
-match cmd
-    "version" => concat("calcium-selfhost ", version()) !> io.say
-    "help" => usage() !> io.say
-    "" => usage() !> io.say
-    _ => unimplemented(cmd);
+// Literal payload patterns keep the dispatch readable.
+match get(args, 2)
+    Maybe.Some("version") => concat("calcium-selfhost ", version()) !> io.say
+    Maybe.Some("help") => usage() !> io.say
+    Maybe.Some(cmd) => unimplemented(cmd)
+    Maybe.None => do
+        usage() !> io.say
+        os.exit(1)
+    end;
