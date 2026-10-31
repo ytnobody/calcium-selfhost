@@ -180,3 +180,30 @@ the parser and is cheap to fix now.
 
 The lexer itself needed none of these fixes: it is a pure function returning a
 token list, with the list kept opaque to `main.ca`.
+
+## D12 — Tail calls were only optimized in the final match arm (**fixed upstream**)
+
+Found while writing the lexer: a 60 KB file overflowed the 8,192-frame limit
+because the token loop recursed inside a `true` arm.
+
+`OpTailCall` was produced by a peephole that looked only at the instruction just
+before the function's `OpReturn`. A non-final match arm ends with a jump that
+skips the remaining arms, so the call before it was never converted:
+
+```calcium
+func loop(n, acc) = match n <= 0
+    true => acc
+    false => loop(n - 1, acc + 1);   // grew the stack
+```
+
+That is the ordinary shape for recursive descent, so it blocked SH-2.
+
+Fixed upstream by `fix(compiler): optimize tail calls in any match arm`: tail
+position is tracked through match arms, `do` block final expressions and
+`return`, and any node compiled in tail position whose value ends in a call has
+that call rewritten. Side effect worth knowing: mutual recursion between the
+lexer's scanners is now flat too, so long string literals and heredocs no longer
+risk the frame limit.
+
+Verified: 12 KB, 62 KB and 125 KB inputs lex in 0.16 s, 0.75 s and 1.44 s
+(linear), all byte-identical to the reference.
