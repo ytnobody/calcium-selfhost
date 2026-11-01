@@ -1,10 +1,295 @@
-// formatter - AST to canonically formatted source (SH-2).
+// formatter - AST back to canonically formatted source.
 //
-// Not implemented yet. See ../SPEC.md and
-// calcium-lang/specs/selfhost-scope.md for the stage plan and scope.
+// The output is compared byte for byte against the reference implementation's
+// `calcium fmt`, so every rule here mirrors it: two-space indentation, one blank
+// line between top-level statements, integers printed from their source text
+// while strings are re-escaped from their decoded value, and a hash literal kept
+// on one line only when it is short.
+//
+// The reference formatter drops comments (the lexer does not keep them), so this
+// one does too.
+//
+// `depth` is threaded explicitly instead of being mutable state.
 
 namespace formatter;
 
-// implemented reports whether this component exists yet. The differential
-// harness uses it to decide which comparisons it can run.
-func implemented() = false;
+use core.string;
+use core.array;
+use ast;
+
+_INDENT = "  ";
+
+func indent(d) = repeat_indent(d, "");
+
+func repeat_indent(d, acc) = match d <= 0
+    true => acc
+    false => repeat_indent(d - 1, concat(acc, _INDENT));
+
+// ---------------------------------------------------------------------------
+// Program and statements
+// ---------------------------------------------------------------------------
+
+func format_program(statements) = finish_program(format_statements(statements, 0, len(statements), ""));
+
+func format_statements(ss, i, n, acc) = match i >= n
+    true => acc
+    false => format_statements(ss, i + 1, n, format_statement_joined(ss[i], i, acc));
+
+// One blank line between statements, which is what joining with "\n" gives when
+// every statement already ends with a newline.
+func format_statement_joined(stmt, index, acc) = match index == 0
+    true => concat(acc, format_statement(stmt, 0))
+    false => concat(acc, "\n", format_statement(stmt, 0));
+
+func finish_program(s) = match string.ends_with(s, "\n")
+    true => s
+    false => concat(s, "\n");
+
+func format_statement(stmt, d) = match stmt
+    Stmt.SUse(path, effect) => use_line(path, effect, d)
+    Stmt.SNamespace(path) => concat(indent(d), "namespace ", path, ";\n")
+    Stmt.SAssign(name, value) => concat(indent(d), name, " = ", expr(value, d), ";\n")
+    Stmt.SArrayDestr(names, value) => concat(indent(d), "[", string.join(names, ", "), "] = ", expr(value, d), ";\n")
+    Stmt.SHeadTailDestr(head, tail, value) => concat(indent(d), "[", head, " | ", tail, "] = ", expr(value, d), ";\n")
+    Stmt.SFunc(name, params, constraints, body, is_effect) => function_decl(name, params, constraints, body, is_effect, d)
+    Stmt.SConstraint(name, params, body) => concat(indent(d), "constraint ", name, "(", string.join(params, ", "), ") = ", expr(body, d), ";\n")
+    Stmt.SType(name, variants) => type_decl(name, variants, d)
+    Stmt.SExpr(e) => concat(indent(d), expr(e, d), ";\n")
+    _ => concat(indent(d), "/* unknown statement */\n");
+
+func use_line(path, is_effect, d) = match is_effect
+    true => concat(indent(d), "use ", path, "!;\n")
+    false => concat(indent(d), "use ", path, ";\n");
+
+func function_decl(name, params, constraints, body, is_effect, d) = do
+    head = match is_effect
+        true => concat(indent(d), "func! ", name, "(", render_params(params, constraints), ") =")
+        false => concat(indent(d), "func ", name, "(", render_params(params, constraints), ") =")
+    concat(head, " ", expr(body, d), ";\n")
+end;
+
+// render_params writes `a, b: C?, c`. An empty constraint string means none.
+func render_params(params, constraints) = string.join(render_params_from(params, constraints, 0, len(params), []), ", ");
+
+func render_params_from(params, constraints, i, n, acc) = match i >= n
+    true => acc
+    false => render_params_from(params, constraints, i + 1, n, push(acc, render_param(params[i], constraint_at(constraints, i))));
+
+func render_param(name, c) = match c == ""
+    true => name
+    false => concat(name, ": ", c, "?");
+
+func constraint_at(cs, i) = match i < len(cs)
+    true => cs[i]
+    false => "";
+
+func type_decl(name, variants, d) = match len(variants) == 0
+    true => concat(indent(d), "type ", name, " =;\n")
+    false => concat(indent(d), "type ", name, " =", render_variants(variants, 0, len(variants)), ";\n");
+
+func render_variants(vs, i, n) = match i >= n
+    true => ""
+    false => concat(variant_sep(i), render_variant(vs[i]), render_variants(vs, i + 1, n));
+
+func variant_sep(i) = match i == 0
+    true => " "
+    false => " | ";
+
+func render_variant(v) = match v
+    Variant.Variant(name, fields) => variant_body(name, fields)
+    _ => "";
+
+func variant_body(name, fields) = match len(fields) == 0
+    true => name
+    false => concat(name, "(", string.join(fields, ", "), ")");
+
+// ---------------------------------------------------------------------------
+// Expressions
+// ---------------------------------------------------------------------------
+
+func expr(e, d) = match e
+    Expr.EIdent(name) => name
+    Expr.EWild => "_"
+    Expr.EInt(raw) => raw
+    Expr.EFloat(raw) => raw
+    Expr.EStr(value) => concat("\"", escape_string(value), "\"")
+    Expr.EInterp(parts) => interpolated(parts, d, 0, len(parts), "\"")
+    Expr.ERegex(text) => text
+    Expr.EBool(value) => bool_text(value)
+    Expr.ETuple(elements) => concat("(", render_list(elements, d), ")")
+    Expr.EArray(elements, is_concat) => array_text(elements, is_concat, d)
+    Expr.EHash(pairs) => hash_text(pairs, d)
+    Expr.EPrefix(op, right) => concat(op, expr(right, d))
+    Expr.EInfix(op, left, right) => concat(expr(left, d), " ", op, " ", expr(right, d))
+    Expr.ECall(fn, args) => concat(expr(fn, d), "(", render_list(args, d), ")")
+    Expr.EIndex(left, index) => concat(expr(left, d), "[", expr(index, d), "]")
+    Expr.EMember(object, property) => concat(expr(object, d), ".", property)
+    Expr.ELambda(params, body) => lambda_text(params, body, d)
+    Expr.EPipe(left, right) => concat(expr(left, d), " |> ", expr(right, d))
+    Expr.EEffectPipe(left, right, secret) => concat(expr(left, d), effect_op(secret), expr(right, d))
+    Expr.EErrorPipe(left, right) => concat(expr(left, d), " |>? ", expr(right, d))
+    Expr.ESpread(value) => concat(expr(value, d), "...")
+    Expr.EMatch(subject, cases) => match_text(subject, cases, d)
+    Expr.EEffectHandle(subject, sv, sb, fv, fb) => effect_handle(subject, sv, sb, fv, fb, d)
+    Expr.ESuccess(value) => concat("success(", expr(value, d), ")")
+    Expr.EFailure(value) => concat("failure(", expr(value, d), ")")
+    Expr.EReturn(value) => concat("return ", expr(value, d))
+    Expr.EConstraintCheck(target) => concat(expr(target, d), "?")
+    Expr.EDo(statements, final) => do_text(statements, final, d)
+    Expr.ESecretWith(capability, statements, final) => secret_with(capability, statements, final, d)
+    Expr.EStay(state_init, body) => stay_text(state_init, body, d)
+    Expr.EModulePath(text) => text
+    Expr.EConstructorPattern(type_name, name, fields) => ctor_pattern(type_name, name, fields, d)
+    _ => "/* unknown expression */";
+
+func bool_text(value) = match value
+    true => "true"
+    false => "false";
+
+func effect_op(secret) = match secret
+    true => " !!!> "
+    false => " !> ";
+
+func render_list(items, d) = string.join(map_expr(items, d, 0, len(items), []), ", ");
+
+func map_expr(items, d, i, n, acc) = match i >= n
+    true => acc
+    false => map_expr(items, d, i + 1, n, push(acc, expr(items[i], d)));
+
+func array_text(elements, is_concat, d) = match len(elements) == 0
+    true => "[]"
+    false => array_body(elements, is_concat, d);
+
+func array_body(elements, is_concat, d) = match is_concat
+    true => concat("[", string.join(map_expr(elements, d, 0, len(elements), []), " "), "]")
+    false => concat("[", render_list(elements, d), "]");
+
+// interpolated rebuilds `"text ${expr} text"` from alternating string and
+// expression parts.
+func interpolated(parts, d, i, n, acc) = match i >= n
+    true => concat(acc, "\"")
+    false => interpolated(parts, d, i + 1, n, concat(acc, interp_part(parts[i], d)));
+
+func interp_part(part, d) = match part
+    Expr.EStr(value) => escape_string(value)
+    _ => concat("${", expr(part, d), "}");
+
+// hash_text keeps a short hash on one line, exactly as the reference does:
+// at most three pairs and at most 60 characters once rendered.
+func hash_text(pairs, d) = match len(pairs) == 0
+    true => "{}"
+    false => hash_choose(pairs, d, render_pairs_oneline(pairs, d));
+
+func hash_choose(pairs, d, oneline) = match len(pairs) <= 3 && len(oneline) <= 60
+    true => oneline
+    false => hash_multiline(pairs, d);
+
+func render_pairs_oneline(pairs, d) = concat("{ ", string.join(render_pairs(pairs, d, 0, len(pairs), []), ", "), " }");
+
+func render_pairs(pairs, d, i, n, acc) = match i >= n
+    true => acc
+    false => render_pairs(pairs, d, i + 1, n, push(acc, render_pair(pairs[i], d)));
+
+func render_pair(pair, d) = match pair
+    HashPair.HashPair(key, value) => concat(expr(key, d), ": ", expr(value, d))
+    _ => "";
+
+func hash_multiline(pairs, d) = concat("{\n", hash_lines(pairs, d + 1, 0, len(pairs), ""), indent(d), "}");
+
+func hash_lines(pairs, d, i, n, acc) = match i >= n
+    true => acc
+    false => hash_lines(pairs, d, i + 1, n, concat(acc, indent(d), render_pair(pairs[i], d), pair_comma(i, n), "\n"));
+
+func pair_comma(i, n) = match i < n - 1
+    true => ","
+    false => "";
+
+func lambda_text(params, body, d) = match len(params) == 1
+    true => concat(params[0], " => ", expr(body, d))
+    false => concat("(", string.join(params, ", "), ") => ", expr(body, d));
+
+// match_text renders `match subject` and its arms one per line, one level in.
+func match_text(subject, cases, d) = concat("match ", expr(subject, d), case_lines(cases, d + 1, 0, len(cases), ""));
+
+func case_lines(cases, d, i, n, acc) = match i >= n
+    true => acc
+    false => case_lines(cases, d, i + 1, n, concat(acc, "\n", indent(d), case_text(cases[i], d)));
+
+func case_text(c, d) = match c
+    Case.Case(pattern, guard, body, is_default) => case_body(pattern, guard, body, is_default, d)
+    _ => "";
+
+func case_body(pattern, guard, body, is_default, d) = do
+    p = match is_default
+        true => "_"
+        false => expr(pattern, d)
+    g = match guard
+        Expr.EWild => ""
+        _ => concat(" if ", expr(guard, d))
+    concat(p, g, " => ", expr(body, d))
+end;
+
+func ctor_pattern(type_name, name, fields, d) = do
+    full = match type_name == ""
+        true => name
+        false => concat(type_name, ".", name)
+    match len(fields) == 0
+        true => full
+        false => concat(full, "(", render_list(fields, d), ")")
+end;
+
+func effect_handle(subject, sv, sb, fv, fb, d) = concat(
+    expr(subject, d), " !? {\n",
+    indent(d + 1), "success(", sv, ") => ", expr(sb, d + 1), "\n",
+    indent(d + 1), "failure(", fv, ") => ", expr(fb, d + 1), "\n",
+    indent(d), "}");
+
+// do_text renders `do`, the statements, the final expression, then `end`.
+func do_text(statements, final, d) = concat(
+    "do\n",
+    format_block_statements(statements, d + 1, 0, len(statements), ""),
+    indent(d + 1), expr(final, d + 1), "\n",
+    indent(d), "end");
+
+func format_block_statements(ss, d, i, n, acc) = match i >= n
+    true => acc
+    false => format_block_statements(ss, d, i + 1, n, concat(acc, format_statement(ss[i], d)));
+
+func secret_with(capability, statements, final, d) = concat(
+    "Secret.with(", expr(capability, d), ") {\n",
+    format_block_statements(statements, d + 1, 0, len(statements), ""),
+    indent(d + 1), expr(final, d + 1), "\n",
+    indent(d), "}");
+
+func stay_text(state_init, body, d) = concat(
+    "async.stay(", render_state(state_init, d), ") {\n",
+    format_block_statements(body, d + 1, 0, len(body), ""),
+    indent(d), "}");
+
+func render_state(pairs, d) = string.join(render_state_from(pairs, d, 0, len(pairs), []), ", ");
+
+func render_state_from(pairs, d, i, n, acc) = match i >= n
+    true => acc
+    false => render_state_from(pairs, d, i + 1, n, push(acc, render_state_pair(pairs[i], d)));
+
+func render_state_pair(pair, d) = match pair
+    StatePair.StatePair(name, value) => concat(name, ": ", expr(value, d))
+    _ => "";
+
+// ---------------------------------------------------------------------------
+// Escaping
+// ---------------------------------------------------------------------------
+
+func escape_string(s) = escape_from(string.split(s, ""), 0, len(s), "");
+
+func escape_from(chars, i, n, acc) = match i >= n
+    true => acc
+    false => escape_from(chars, i + 1, n, concat(acc, escape_char(chars[i])));
+
+func escape_char(c) = match c
+    "\\" => "\\\\"
+    "\"" => "\\\""
+    "\n" => "\\n"
+    "\t" => "\\t"
+    "\r" => "\\r"
+    _ => c;

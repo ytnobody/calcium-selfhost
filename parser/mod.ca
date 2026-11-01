@@ -441,11 +441,24 @@ func parse_tuple(toks, acc) = do
         false => res(ast.ETuple(acc2), expect(r.t, ")"))
 end;
 
-// `x => body` after an identifier.
-func parse_lambda_body(param, toks) = do
+// `x => body` or `(a, b) => body`.
+func parse_lambda_body(params, toks) = do
     r = parse_expression(toks, 1)
-    res(ast.ELambda([param], r.e), r.t)
+    res(ast.ELambda(param_names(params), r.e), r.t)
 end;
+
+func param_names(e) = match e
+    Expr.EIdent(name) => [name]
+    Expr.ETuple(elements) => map_names(elements, 0, len(elements), [])
+    _ => ["_"];
+
+func map_names(es, i, n, acc) = match i >= n
+    true => acc
+    false => map_names(es, i + 1, n, push(acc, param_name(es[i])));
+
+func param_name(e) = match e
+    Expr.EIdent(name) => name
+    _ => "_";
 
 func parse_array(toks) = parse_array_items(rest(toks), [], false);
 
@@ -458,8 +471,12 @@ func parse_array_item(toks, acc, is_concat) = do
     acc2 = push(acc, r.e)
     match is_kind(r.t, ",")
         true => parse_array_items(rest(r.t), acc2, is_concat)
-        false => parse_array_items(r.t, acc2, true)
+        false => parse_array_tail(r.t, acc2, is_concat)
 end;
+
+func parse_array_tail(toks, acc, is_concat) = match is_kind(toks, "]")
+    true => res(ast.EArray(acc, is_concat), rest(toks))
+    false => parse_array_items(toks, acc, true);
 
 func parse_hash(toks) = parse_hash_pairs(rest(toks), []);
 

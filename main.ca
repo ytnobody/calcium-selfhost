@@ -4,6 +4,7 @@ use core.string;
 use core.array;
 use lexer;
 use parser;
+use formatter;
 
 // calcium-selfhost CLI entry point.
 //
@@ -106,6 +107,16 @@ func parse_file(path) = do
     concat("# statements: ", to_string(len(result.statements))) !> io.say
 end;
 
+// fmt_file writes the formatted source to the -o target. The reference `fmt`
+// edits in place, which cannot be compared, so this one always writes to a file.
+func fmt_file(argv) = do
+    input = get(argv, 3, "")
+    output = get(argv, 5, "")
+    src = read_source(input)
+    parsed = parser.parse_program(lexer.tokenize(src))
+    io.write_file(output, formatter.format_program(parsed.statements))
+end;
+
 func read_source(path) = io.read_file(path) !? {
     success(v) => v
     failure(e) => ""
@@ -123,6 +134,7 @@ match get(args, 2)
     Maybe.Some("version") => concat("calcium-selfhost ", version()) !> io.say
     Maybe.Some("lex") => lex_file(get(args, 3, ""))
     Maybe.Some("parse") => parse_file(get(args, 3, ""))
+    Maybe.Some("fmt") => fmt_file(args)
     Maybe.Some("help") => usage() !> io.say
     Maybe.Some(cmd) => unimplemented(cmd)
     Maybe.None => do

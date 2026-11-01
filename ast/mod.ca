@@ -42,7 +42,7 @@ type Expr =
     ESuccess(value) |
     EFailure(value) |
     EReturn(value) |
-    EConstraintCheck(constraint) |
+    EConstraintCheck(target) |
     EDo(statements, final) |
     ESecretWith(capability, statements, final) |
     EStay(state_init, body) |
