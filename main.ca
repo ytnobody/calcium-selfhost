@@ -197,8 +197,10 @@ func! load_local_modules(paths, i, n, source_dir, mods) = match i >= n
     true => mods
     false => load_local_modules(paths, i + 1, n, source_dir, load_one_module(paths[i], source_dir, mods));
 
+// A local module is resolved like the reference does for a source file: from the
+// file's directory and from its parent (the project root for tests/*.test.ca).
 func! load_one_module(path, source_dir, mods) = do
-    file = concat(source_dir, "/", path, "/mod.ca");
+    file = module_file(source_dir, path);
     src = read_source(file);
     match src == ""
         true => mods
@@ -212,6 +214,13 @@ func! load_one_module(path, source_dir, mods) = do
                     hash_set(mods, path, exports_hash(st.globals, ran.globals, 0, len(st.globals), {}))
                 end
         end
+end;
+
+func! module_file(source_dir, path) = do
+    first = concat(source_dir, "/", path, "/mod.ca");
+    match io.exists(first)
+        true => first
+        false => concat(source_dir, "/../", path, "/mod.ca")
 end;
 
 // exports_hash turns the module's globals into a namespace: name -> value.

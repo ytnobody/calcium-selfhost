@@ -368,6 +368,7 @@ func dispatch(st, op, ip) = match op
     bytecode.false_() => op_push(st, ip, false)
     bytecode.none() => op_push(st, ip, Maybe.None)
     bytecode.construct_adt() => op_construct_adt(st, ip)
+    bytecode.construct_maybe_some() => op_construct_maybe_some(st, ip)
     bytecode.match_adt() => op_match_adt(st, ip)
     bytecode.wrap_success() => op_wrap(st, ip, true)
     bytecode.wrap_failure() => op_wrap(st, ip, false)
@@ -760,6 +761,13 @@ func make_adt(tag, items) = do
         true => parts[1]
         false => tag;
     AdtVal(type_name, variant, items)
+end;
+
+// OpConstructMaybeSome builds the built-in Maybe.Some(value), which is a native
+// Calcium value rather than one of this interpreter's ADTs.
+func op_construct_maybe_some(st, ip) = do
+    r = pop_value(st);
+    done(advance(push_value(r.st, Maybe.Some(r.v)), ip))
 end;
 
 func op_match_adt(st, ip) = do
