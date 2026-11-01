@@ -17,6 +17,8 @@ use core.string;
 use core.array;
 use core.types;
 use core.io!;
+use core.math;
+use core.array;
 use bytecode;
 use serialize;
 
@@ -170,8 +172,15 @@ func operand_bytes(op) = match op
 // provides the few members it needs itself.
 // ---------------------------------------------------------------------------
 
+// Modules are provided by forwarding to the host's own stdlib: the interpreter
+// runs on the reference VM, so `string.trim` etc. are reachable even though the
+// host's *module loader* is not. Any other module is unsupported.
 func module_member(path, name) = match path
     "core.io" => io_member(name)
+    "core.string" => HostFn(concat("core.string:", name))
+    "core.array" => HostFn(concat("core.array:", name))
+    "core.math" => HostFn(concat("core.math:", name))
+    "core.types" => HostFn(concat("core.types:", name))
     _ => HostFn("unsupported-module:");
 
 func io_member(name) = match name
@@ -559,14 +568,35 @@ func call_closure(st, callee, base, nargs, tail) = do
     // pops) can happen before that, so the array has to reach `top`.
     st2 = set_state(st, ensure_size(st.stack, top), top, st.frames, st.last, st.globals);
     match tail
-        true => {finished: false, st: set_frame_tail(st2, callee, base)}
+        true => {finished: false, st: tail_frame(st, callee, base, nargs)}
         false => {finished: false, st: push_frame(st2, callee, base)}
 end;
 
-// A tail call replaces the current frame. Its base is where the callee's arguments
-// start, not the *previous* frame's base: using the latter makes the callee read
-// its caller's locals.
-func set_frame_tail(st, callee, base) = set_frame(st, make_frame(callee, 0, base));
+// A tail call replaces the current frame. The frame keeps its own base - that is
+// where the *original* caller expects the result - so the callee's arguments are
+// moved down to it, exactly as the reference VM does. Keeping the new argument
+// position as the base instead leaves the caller's slots untrimmed, which is why
+// `n |> inc |> (r => ...)` computed the right value and then printed nothing.
+func tail_frame(st, callee, args_base, nargs) = do
+    fbase = frame_base(current(st));
+    moved = copy_down(st.stack, args_base, fbase, nargs);
+    top = fbase + cl_locals(callee);
+    set_state(st, ensure_size(moved, top), top,
+        replace_at(st.frames, 0, len(st.frames) - 1, make_frame(callee, 0, fbase), []),
+        st.last, st.globals)
+end;
+
+// copy_down moves `n` slots from `from` to `to` (to < from).
+func copy_down(arr, from, to, n) = copy_down_loop(arr, from, to, 0, n, []);
+
+func copy_down_loop(arr, from, to, i, n, acc) = match i >= len(arr)
+    true => acc
+    false => copy_down_loop(arr, from, to, i + 1, n,
+        push(acc, move_value(arr, from, to, i, n)));
+
+func move_value(arr, from, to, i, n) = match i >= to && i < to + n
+    true => arr[from + (i - to)]
+    false => arr[i];
 
 // A return removes the frame, drops the callee and argument slots, and leaves the
 // return value in their place for the caller.
@@ -646,9 +676,11 @@ func member_of(obj, name) = match types.is_hash(obj)
 
 // A module is represented as a hash with a `__module` marker.
 // Member access yields the value itself, not a Maybe: `h.name` is a field read.
+// A bare identifier in a match arm is an expression to compare, not a binding, so
+// the module path is read again rather than captured.
 func module_or_hash(obj, name) = match get(obj, "__module", "")
-    "core.io" => module_member("core.io", name)
-    _ => get(obj, name, 0);
+    "" => get(obj, name, 0)
+    _ => module_member(get(obj, "__module", ""), name);
 
 func op_load_module(st, ip) = do
     path = member_name(st, read_u16(cl_body(frame_cl(current(st))), ip));
@@ -912,21 +944,112 @@ func concat_values_loop(args, i, n, acc) = match i >= n
 // the reference VM's own facilities. Anything else is unsupported.
 // ---------------------------------------------------------------------------
 
+// host_apply returns a `{ok, v}` record rather than a bare value or a Result.
+// Calcium's `success`/`failure` cannot be destructured, and an effect function
+// with a match body is not wrapped, so neither `!?` nor a plain read is reliable
+// across both shapes; result_record accepts either.
 func! call_host(st, name, base, nargs) = do
     r = pop_n(st, nargs);
-    result = host_apply(name, r.items) !? {
-        success(v) => v
-        failure(e) => failure(e)
-    };
+    result = result_record(host_apply(name, r.items)).v;
     remaining = set_state(r.st, r.st.stack, base - 1, r.st.frames, r.st.last, r.st.globals);
     {finished: true, st: remaining, v: result}
 end;
 
+func result_record(v) = match types.is_hash(v)
+    true => v
+    false => {ok: true, v: v};
+
+func host_ok(v) = {ok: true, v: v};
+func host_err(m) = {ok: false, v: failure(m)};
+
 func! host_apply(name, args) = match name
-    "say" => host_say(args)
-    "println" => host_say(args)
-    "print" => host_say(args)
-    _ => failure(concat("unsupported host function: ", name));
+    "say" => do
+        host_say(args);
+        host_ok(Maybe.None)
+    end
+    "println" => do
+        host_say(args);
+        host_ok(Maybe.None)
+    end
+    "print" => do
+        host_say(args);
+        host_ok(Maybe.None)
+    end
+    "core.string:split" => host_ok(string.split(args...))
+    "core.string:join" => host_ok(string.join(args...))
+    "core.string:trim" => host_ok(string.trim(args...))
+    "core.string:upper" => host_ok(string.upper(args...))
+    "core.string:to_upper" => host_ok(string.to_upper(args...))
+    "core.string:lower" => host_ok(string.lower(args...))
+    "core.string:to_lower" => host_ok(string.to_lower(args...))
+    "core.string:replace" => host_ok(string.replace(args...))
+    "core.string:substring" => host_ok(string.substring(args...))
+    "core.string:substring_from" => host_ok(string.substring_from(args...))
+    "core.string:char_at" => host_ok(string.char_at(args...))
+    "core.string:index_of" => host_ok(string.index_of(args...))
+    "core.string:starts_with" => host_ok(string.starts_with(args...))
+    "core.string:ends_with" => host_ok(string.ends_with(args...))
+    "core.string:contains" => host_ok(string.contains(args...))
+    "core.string:length" => host_ok(string.length(args...))
+    "core.string:is_empty" => host_ok(string.is_empty(args...))
+    "core.string:repeat" => host_ok(string.repeat(args...))
+    "core.string:pad_left" => host_ok(string.pad_left(args...))
+    "core.string:pad_right" => host_ok(string.pad_right(args...))
+    "core.string:lines" => host_ok(string.lines(args...))
+    "core.string:words" => host_ok(string.words(args...))
+    "core.string:reverse" => host_ok(string.reverse(args...))
+    "core.string:from_code" => host_ok(string.from_code(args...))
+    "core.array:reverse" => host_ok(array.reverse(args...))
+    "core.array:slice" => host_ok(array.slice(args...))
+    "core.array:slice_from" => host_ok(array.slice_from(args...))
+    "core.array:index_of" => host_ok(array.index_of(args...))
+    "core.array:flatten" => host_ok(array.flatten(args...))
+    "core.array:unique" => host_ok(array.unique(args...))
+    "core.array:zip" => host_ok(array.zip(args...))
+    "core.array:take" => host_ok(array.take(args...))
+    "core.array:drop" => host_ok(array.drop(args...))
+    "core.array:sum" => host_ok(array.sum(args...))
+    "core.array:product" => host_ok(array.product(args...))
+    "core.array:any" => host_ok(array.any(args...))
+    "core.array:all" => host_ok(array.all(args...))
+    "core.array:find" => host_ok(array.find(args...))
+    "core.array:find_index" => host_ok(array.find_index(args...))
+    "core.array:count" => host_ok(array.count(args...))
+    "core.array:partition" => host_ok(array.partition(args...))
+    "core.array:sort" => host_ok(array.sort(args...))
+    "core.array:sort_by" => host_ok(array.sort_by(args...))
+    "core.array:chunk" => host_ok(array.chunk(args...))
+    "core.array:intersperse" => host_ok(array.intersperse(args...))
+    "core.array:enumerate" => host_ok(array.enumerate(args...))
+    "core.array:contains" => host_ok(array.contains(args...))
+    "core.math:abs" => host_ok(math.abs(args...))
+    "core.math:min" => host_ok(math.min(args...))
+    "core.math:max" => host_ok(math.max(args...))
+    "core.math:floor" => host_ok(math.floor(args...))
+    "core.math:ceil" => host_ok(math.ceil(args...))
+    "core.math:round" => host_ok(math.round(args...))
+    "core.math:sqrt" => host_ok(math.sqrt(args...))
+    "core.math:pow" => host_ok(math.pow(args...))
+    "core.math:sin" => host_ok(math.sin(args...))
+    "core.math:cos" => host_ok(math.cos(args...))
+    "core.math:tan" => host_ok(math.tan(args...))
+    "core.math:log" => host_ok(math.log(args...))
+    "core.math:exp" => host_ok(math.exp(args...))
+    "core.math:clamp" => host_ok(math.clamp(args...))
+    "core.math:sign" => host_ok(math.sign(args...))
+    "core.types:type_of" => host_ok(types.type_of(args...))
+    "core.types:is_int" => host_ok(types.is_int(args...))
+    "core.types:is_float" => host_ok(types.is_float(args...))
+    "core.types:is_string" => host_ok(types.is_string(args...))
+    "core.types:is_bool" => host_ok(types.is_bool(args...))
+    "core.types:is_array" => host_ok(types.is_array(args...))
+    "core.types:is_hash" => host_ok(types.is_hash(args...))
+    "core.types:is_tuple" => host_ok(types.is_tuple(args...))
+    "core.types:is_function" => host_ok(types.is_function(args...))
+    "core.types:is_number" => host_ok(types.is_number(args...))
+    "core.types:is_success" => host_ok(types.is_success(args...))
+    "core.types:is_failure" => host_ok(types.is_failure(args...))
+    _ => host_err(concat("unsupported host function: ", name));
 
 func! host_say(args) = do
     io.say(vm_to_string(args[0]));
