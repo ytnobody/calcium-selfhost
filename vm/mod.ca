@@ -30,7 +30,7 @@ use serialize;
 // ---------------------------------------------------------------------------
 
 type Value =
-    Closure(record, free) |
+    Closure(record, free, consts) |
     BuiltinFn(index) |
     AdtVal(type_name, tag, items) |
     HostFn(name);
@@ -102,7 +102,7 @@ func set_frame(st, f) = set_state(st, st.stack, st.top,
 // A Frame is an ADT, so its fields are destructured.
 func frame_cl(f) = match f
     Frame.Frame(cl, ip, base) => cl
-    _ => Closure(serialize.FunctionRecord("", "entry", [], 0, false, []), []);
+    _ => Closure(serialize.FunctionRecord("", "entry", [], 0, false, []), [], []);
 
 func frame_ip(f) = match f
     Frame.Frame(cl, ip, base) => ip
@@ -129,7 +129,7 @@ func constant_value(c) = match c
     Constant.CFloat(v) => v
     Constant.CStr(v) => v
     Constant.CAdt(name, tag, items) => AdtVal(name, tag, map_constants(items, 0, len(items), []))
-    Constant.CFunc(record) => Closure(record, [])
+    Constant.CFunc(record) => Closure(record, [], select_constants(record))
     Constant.CRegex(pattern, flags) => compile_regex(pattern, flags)
     _ => 0;
 
@@ -240,15 +240,18 @@ func fn_num_locals(r) = match r
     _ => 0;
 
 func cl_body(cl) = match cl
-    Closure(record, free) => fn_body(record)
+    Closure(record, free, consts) => fn_body(record)
     _ => [];
 
 func cl_locals(cl) = match cl
-    Closure(record, free) => fn_num_locals(record)
+    Closure(record, free, consts) => fn_num_locals(record)
     _ => 0;
 
 func cl_free(cl) = match cl
-    Closure(record, free) => free
+    Closure(record, free, consts) => free
+
+func cl_consts(cl) = match cl
+    Closure(record, free, consts) => consts
     _ => [];
 
 // ---------------------------------------------------------------------------
@@ -258,7 +261,7 @@ func cl_free(cl) = match cl
 func run(constants, instructions) = run_with_modules(constants, instructions, {});
 
 func run_with_modules(constants, instructions, modules) = do
-    main = Closure(serialize.FunctionRecord("<main>", "entry", [], 0, false, instructions), []);
+    main = Closure(serialize.FunctionRecord("<main>", "entry", [], 0, false, instructions), [], constants);
     st = push_frame(with_modules(new_state(constants), modules), main, 0);
     exec(st)
 end;
@@ -266,7 +269,7 @@ end;
 // run_module executes a module's top-level code and returns the resulting state,
 // whose globals hold the module's exports.
 func run_module(constants, instructions, modules) = do
-    main = Closure(serialize.FunctionRecord("<module>", "entry", [], 0, false, instructions), []);
+    main = Closure(serialize.FunctionRecord("<module>", "entry", [], 0, false, instructions), [], constants);
     st = push_frame(with_modules(new_state(constants), modules), main, 0);
     exec_state(st)
 end;
@@ -390,7 +393,15 @@ end;
 // Simple opcodes
 // ---------------------------------------------------------------------------
 
-func op_constant(st, ip) = done(advance(push_value(st, constant_value(st.constants[read_u16(cl_body(frame_cl(current(st))), ip)])), ip));
+func op_constant(st, ip) = do
+    cl = frame_cl(current(st));
+    pool = cl_consts(cl);
+    done(advance(push_value(st, constant_value(pool[read_u16(cl_body(cl), ip)])), ip))
+end;
+
+// A closure created inside a unit shares that unit's pool; only the top-level
+// closure of a module differs, and its pool is the module's.
+func select_constants(record) = [];
 
 func op_pop(st, ip) = done(advance(pop_value(st).st, ip));
 
@@ -446,7 +457,7 @@ func op_closure(st, ip) = do
     idx = read_u16(code, ip);
     count = code[ip + 3];
     frees = pop_n(st, count);
-    cl = Closure(constant_record(st.constants[idx]), frees.items);
+    cl = Closure(constant_record(cl_consts(frame_cl(current(st)))[idx]), frees.items, cl_consts(frame_cl(current(st))));
     done(advance(push_value(frees.st, cl), ip))
 end;
 
@@ -590,7 +601,7 @@ func apply(r) = match r.finished
 // for a closure. Tail calls replace the current frame instead of growing the
 // frame stack.
 func! run_callee(st, callee, base, nargs, tail) = match callee
-    Closure(record, frees) => call_closure(st, callee, base, nargs, tail)
+    Closure(record, frees, consts) => call_closure(st, callee, base, nargs, tail)
     BuiltinFn(index) => call_builtin_value(st, index, base, nargs)
     HostFn(name) => call_host(st, name, base, nargs)
     _ => {finished: true, st: st, v: 0};
@@ -706,12 +717,12 @@ func regex_matches(s, rx) = match types.is_string(s)
     false => false;
 
 func op_get_member(st, ip) = do
-    name = member_name(st, read_u16(cl_body(frame_cl(current(st))), ip));
+    name = member_name(frame_cl(current(st)), read_u16(cl_body(frame_cl(current(st))), ip));
     obj = pop_value(st);
     done(advance(push_value(obj.st, member_of(obj.v, name)), ip))
 end;
 
-func member_name(st, idx) = match st.constants[idx]
+func member_name(cl, idx) = match cl_consts(cl)[idx]
     Constant.CStr(v) => v
     _ => "";
 
@@ -730,7 +741,7 @@ func module_or_hash(obj, name) = match get(obj, "__module", "")
 // A local module the loader prepared is pushed directly; anything else keeps the
 // path marker so member access can reach the native registry.
 func op_load_module(st, ip) = do
-    path = member_name(st, read_u16(cl_body(frame_cl(current(st))), ip));
+    path = member_name(frame_cl(current(st)), read_u16(cl_body(frame_cl(current(st))), ip));
     done(advance(push_value(st, module_value(st, path)), ip))
 end;
 
@@ -748,7 +759,7 @@ func op_builtin(st, ip, index) = done(advance(push_value(st, BuiltinFn(index)), 
 
 func op_construct_adt(st, ip) = do
     code = cl_body(frame_cl(current(st)));
-    tag = member_name(st, read_u16(code, ip));
+    tag = member_name(frame_cl(current(st)), read_u16(code, ip));
     arity = code[ip + 3];
     r = pop_n(st, arity);
     done(advance(push_value(r.st, make_adt(tag, r.items)), ip))
@@ -773,7 +784,7 @@ func op_construct_maybe_some(st, ip) = do
 end;
 
 func op_match_adt(st, ip) = do
-    expected = member_name(st, read_u16(cl_body(frame_cl(current(st))), ip));
+    expected = member_name(frame_cl(current(st)), read_u16(cl_body(frame_cl(current(st))), ip));
     r = pop_value(st);
     done(advance(push_value(r.st, adt_matches(r.v, expected)), ip))
 end;
@@ -869,7 +880,7 @@ func run_until(st, target) = match len(st.frames) <= target
 // is_callable covers the interpreter's own function wrappers, which Calcium's
 // type predicates do not know about.
 func is_callable(v) = match v
-    Closure(record, frees) => true
+    Closure(record, frees, consts) => true
     BuiltinFn(index) => true
     HostFn(name) => true
     _ => false;
@@ -1152,7 +1163,7 @@ end;
 // function as `<func name>` / `<builtin name>`.
 func vm_to_string(v) = match v
     AdtVal(type_name, tag, items) => adt_to_string(tag, items)
-    Closure(record, frees) => concat("<func ", fn_name(record), ">")
+    Closure(record, frees, consts) => concat("<func ", fn_name(record), ">")
     BuiltinFn(index) => concat("<builtin ", builtin_name(index), ">")
     HostFn(name) => concat("<builtin ", name, ">")
     _ => to_string(v);
