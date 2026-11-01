@@ -405,6 +405,10 @@ end;
 
 func parse_prefix(toks) = match is_stay(toks)
     true => parse_stay(toks)
+    false => parse_prefix_secret(toks);
+
+func parse_prefix_secret(toks) = match is_secret_with(toks)
+    true => parse_secret_with(toks)
     false => parse_prefix_rest(toks);
 
 // async.stay(name: value, ...) { ... } is its own construct, not a call with a
@@ -773,6 +777,19 @@ func parse_handler_case(toks) = do
     arrow = expect(after_close, "=>")
     body = parse_expression(arrow, 2)
     {name: name, body: body.e, t: body.t}
+end;
+
+// Secret.with(capability) { ... } is a scoped block like async.stay, not a call
+// with a trailing block.
+func is_secret_with(toks) = kind(toks) == "IDENT" && lit(toks) == "Secret" &&
+    peek_kind(toks) == "." && lit(rest(rest(toks))) == "with" && peek3_kind(toks) == "(";
+
+func parse_secret_with(toks) = do
+    open = rest(rest(rest(toks)))
+    cap = parse_expression(rest(open), 1)
+    body_open = expect(expect(cap.t, ")"), "{")
+    body = parse_block_statements(body_open, [])
+    res(ast.ESecretWith(cap.e, do_init(body.ss), do_final(body.ss)), body.t)
 end;
 
 func parse_stay(toks) = do
