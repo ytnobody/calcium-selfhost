@@ -23,7 +23,8 @@ type Constant =
     CFloat(value) |
     CStr(value) |
     CFunc(record) |
-    CAdt(type_name, tag, items);
+    CAdt(type_name, tag, items) |
+    CRegex(pattern, flags);
 
 // FunctionRecord is one function constant: everything the format stores about a
 // function, including its own instruction stream.
@@ -74,12 +75,18 @@ func encode_constant(c) = match c
     Constant.CStr(value) => concat_bytes(u8(_TAG_STRING), str_bytes(value))
     Constant.CFunc(record) => concat_bytes(u8(_TAG_FUNCTION), encode_function(record))
     Constant.CAdt(type_name, tag, items) => encode_adt(type_name, tag, items)
+    Constant.CRegex(pattern, flags) => encode_regex(pattern, flags)
     _ => [];
 
 // encode_adt writes an ADT constant: type name, tag, value count, values.
 func encode_adt(type_name, tag, items) = concat_bytes(u8(_TAG_ADT),
     concat_bytes(concat_bytes(str_bytes(type_name), str_bytes(tag)),
         concat_bytes(u32(len(items)), encode_constants(items, 0, len(items), []))));
+
+// encode_regex stores the Calcium pattern and its flags; the reader rebuilds the
+// native regex from them.
+func encode_regex(pattern, flags) = concat_bytes(u8(_TAG_REGEX),
+    concat_bytes(str_bytes(pattern), str_bytes(flags)));
 
 func bool_byte(value) = match value
     true => 1

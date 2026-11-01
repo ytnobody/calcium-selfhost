@@ -279,6 +279,8 @@ func compile_expr(st, e) = match e
     Expr.ESuccess(value) => compile_success(st, value)
     Expr.EFailure(value) => compile_failure(st, value)
     Expr.EReturn(value) => compile_return(st, value)
+    Expr.ERegex(text) => compile_regex(st, text)
+    Expr.EConstraintCheck(target) => compile_constraint_check(st, target)
     Expr.EHash(pairs) => compile_hash(st, pairs)
     Expr.ELambda(params, body) => compile_lambda(st, params, body)
     Expr.EMatch(subject, cases) => compile_match(st, subject, cases)
@@ -459,6 +461,33 @@ func compile_failure(st, value) = do
     {e: ast.EWild, st: emit(s1, bytecode.ins(bytecode.wrap_failure()))}
 end;
 
+/// A regex literal's source text is `/pattern/flags`; the constant stores the
+// two parts separately.
+func compile_regex(st, text) = do
+    inner = string.substring(text, 1, regex_body_end(text));
+    flags = string.substring_from(text, regex_body_end(text) + 1);
+    compile_const(st, serialize.CRegex(inner, flags))
+end;
+
+// regex_body_end is the index of the closing slash: scanning backwards avoids
+// being fooled by an escaped slash inside the pattern.
+func regex_body_end(text) = regex_scan(text, 1, len(text), 1);
+
+func regex_scan(text, i, n, last) = match i >= n
+    true => last
+    false => regex_scan_step(text, i, n, last);
+
+func regex_scan_step(text, i, n, last) = match string.char_at(text, i)
+    Maybe.Some("/") => regex_scan(text, i + 1, n, i)
+    _ => regex_scan(text, i + 1, n, last);
+
+// `value |> C?` pushes the value, the constraint, the value again, calls the
+// constraint and wraps the result.
+func compile_constraint_check(st, target) = do
+    s1 = compile_expr_strict(st, target);
+    {e: ast.EWild, st: emit(s1, bytecode.ins(bytecode.check_constraint()))}
+end;
+
 func compile_return(st, value) = do
     s1 = compile_expr_strict(st, value);
     {e: ast.EWild, st: emit(s1, bytecode.ins(bytecode.ret()))}
@@ -515,9 +544,37 @@ func builtin_of(name) = match name
     "hash_merge" => Maybe.Some(15)
     _ => Maybe.None;
 
+// `&&` and `||` short-circuit, so they need jumps rather than an opcode pair.
+// Chained comparisons are expanded into `&&` at parse time, so this is on the
+// path for `0 <= n <= 10` too.
+func compile_infix(st, op, left, right) = match op
+    "&&" => compile_and(st, left, right)
+    "||" => compile_or(st, left, right)
+    _ => compile_binary(st, op, left, right);
+
+func compile_and(st, left, right) = do
+    s1 = compile_expr_strict(st, left);
+    s2 = emit(s1, bytecode.ins(bytecode.dup()));
+    jump_pos = len(s2.code);
+    s3 = emit(s2, bytecode.ins_u16(bytecode.jump_if_false(), 0));
+    s4 = emit(s3, bytecode.ins(bytecode.pop()));
+    s5 = compile_expr_strict(s4, right);
+    {e: ast.EWild, st: patch_u16(s5, jump_pos, len(s5.code))}
+end;
+
+func compile_or(st, left, right) = do
+    s1 = compile_expr_strict(st, left);
+    s2 = emit(s1, bytecode.ins(bytecode.dup()));
+    jump_pos = len(s2.code);
+    s3 = emit(s2, bytecode.ins_u16(bytecode.jump_if_true(), 0));
+    s4 = emit(s3, bytecode.ins(bytecode.pop()));
+    s5 = compile_expr_strict(s4, right);
+    {e: ast.EWild, st: patch_u16(s5, jump_pos, len(s5.code))}
+end;
+
 // Binary arithmetic on two operands. The operand order is left then right, which
 // is what the VM pops.
-func compile_infix(st, op, left, right) = do
+func compile_binary(st, op, left, right) = do
     l = compile_expr(st, left);
     r = compile_expr(l.st, right);
     {e: ast.EWild, st: emit(r.st, bytecode.ins(binary_opcode(op)))}
@@ -541,6 +598,7 @@ func binary_opcode(op) = match op
     "^" => bytecode.bit_xor()
     "<<" => bytecode.shl()
     ">>" => bytecode.shr()
+    "~" => bytecode.regex_match()
     _ => bytecode.dup();
 
 // ---------------------------------------------------------------------------
