@@ -483,18 +483,25 @@ end;
 // Calls
 // ---------------------------------------------------------------------------
 
-// run_callee is effectful (a host call prints), so its result arrives wrapped in
-// success/failure and has to be unwrapped here.
+// The caller's program counter is advanced *before* the callee runs: a return
+// resumes the caller at its next instruction, so leaving the counter on the call
+// would execute it again.
+//
+// run_callee is effectful (a host call prints), so its result can arrive wrapped
+// in success/failure and has to be unwrapped.
 func op_call(st, ip, nargs) = do
-    base = st.top - nargs;
-    callee = st.stack[base - 1];
-    apply(unwrap_callee(run_callee(st, callee, base, nargs, false), st), ip)
+    st1 = advance(st, ip);
+    base = st1.top - nargs;
+    callee = st1.stack[base - 1];
+    apply(unwrap_callee(run_callee(st1, callee, base, nargs, false), st1))
 end;
 
+// A tail call replaces the frame, so the current program counter is discarded and
+// needs no advancing.
 func op_tail_call(st, ip, nargs) = do
     base = st.top - nargs;
     callee = st.stack[base - 1];
-    apply(unwrap_callee(run_callee(st, callee, base, nargs, true), st), ip)
+    apply(unwrap_callee(run_callee(st, callee, base, nargs, true), st))
 end;
 
 // run_callee is an effect function, so its result is normally wrapped in success.
@@ -513,8 +520,8 @@ func unwrap_wrapped_callee(wrapped, st) = wrapped !? {
 
 func failed_callee(st, reason) = {finished: true, st: st, v: failure(reason)};
 
-func apply(r, ip) = match r.finished
-    true => done(advance(push_value(r.st, r.v), ip))
+func apply(r) = match r.finished
+    true => done(push_value(r.st, r.v))
     false => done(r.st);
 
 // run_callee either finishes a builtin (whose result is `v`) or pushes a frame
@@ -579,7 +586,17 @@ end;
 
 // Indexing a hash yields the value itself, not a Maybe: the compiler emits
 // OpIndex for `h[k]`, and a missing key is an error in the reference.
-func index_into(obj, idx) = match types.is_array(obj)
+// An ADT index selects a constructor payload, which is how OpIndex binds a
+// field in a constructor pattern.
+func index_into(obj, idx) = match obj
+    AdtVal(type_name, tag, items) => adt_item(items, idx)
+    _ => index_container(obj, idx);
+
+func adt_item(items, idx) = match idx >= 0 && idx < len(items)
+    true => items[idx]
+    false => 0;
+
+func index_container(obj, idx) = match types.is_array(obj)
     true => obj[idx]
     false => match types.is_hash(obj)
         true => get(obj, idx, 0)
@@ -751,6 +768,28 @@ func! host_apply(name, args) = match name
     _ => failure(concat("unsupported host function: ", name));
 
 func! host_say(args) = do
-    io.say(to_string(args[0]));
+    io.say(vm_to_string(args[0]));
     Maybe.None
 end;
+
+// vm_to_string renders the interpreter's own wrappers the way the reference
+// prints them: an ADT as `Tag(a, b)`, a zero-argument variant as `Tag`, and a
+// function as `<func name>` / `<builtin name>`.
+func vm_to_string(v) = match v
+    AdtVal(type_name, tag, items) => adt_to_string(tag, items)
+    Closure(record, frees) => concat("<func ", fn_name(record), ">")
+    BuiltinFn(index) => concat("<builtin ", builtin_name(index), ">")
+    HostFn(name) => concat("<builtin ", name, ">")
+    _ => to_string(v);
+
+func adt_to_string(tag, items) = match len(items) == 0
+    true => tag
+    false => concat(tag, "(", join_values(items, 0, len(items), ""), ")");
+
+func join_values(items, i, n, acc) = match i >= n
+    true => acc
+    false => join_values(items, i + 1, n, concat(acc, value_sep(i), vm_to_string(items[i])));
+
+func value_sep(i) = match i == 0
+    true => ""
+    false => ", ";
