@@ -26,7 +26,34 @@ use serialize;
 //   consts   constant pool (serialize.Constant values)
 //   globals  [{name, index}] for global symbols
 //   nglobals next free global index
-func new_state() = {code: [], consts: [], globals: [], nglobals: 0};
+// A state record holds everything the compiler accumulates.
+//   code      instruction bytes
+//   consts    constant pool (serialize.Constant values)
+//   globals   [{name, index}] for global symbols
+//   nglobals  next free global index
+//   locals    [{name, index}] for the function being compiled
+//   nlocals   next free local index
+func new_state() = {code: [], consts: [], globals: [], nglobals: 0, locals: [], nlocals: 0};
+
+// with_fresh_locals starts a new function body: parameters become locals 0..n-1.
+func with_fresh_locals(st, params) = {
+    code: st.code, consts: st.consts, globals: st.globals, nglobals: st.nglobals,
+    locals: params_locals(params, 0, len(params), []), nlocals: len(params)
+};
+
+func params_locals(params, i, n, acc) = match i >= n
+    true => acc
+    false => params_locals(params, i + 1, n, push(acc, {name: params[i], index: i}));
+
+func without_locals(st) = {
+    code: st.code, consts: st.consts, globals: st.globals, nglobals: st.nglobals,
+    locals: [], nlocals: 0
+};
+
+func define_local(st, name) = {
+    code: st.code, consts: st.consts, globals: st.globals, nglobals: st.nglobals,
+    locals: push(st.locals, {name: name, index: st.nlocals}), nlocals: st.nlocals + 1
+};
 
 // ---------------------------------------------------------------------------
 // Emitting
@@ -34,12 +61,14 @@ func new_state() = {code: [], consts: [], globals: [], nglobals: 0};
 
 func emit(st, bytes) = with_code(st, concat_arr(st.code, bytes));
 
-func with_code(st, code) = {code: code, consts: st.consts, globals: st.globals, nglobals: st.nglobals};
+func with_code(st, code) = {code: code, consts: st.consts, globals: st.globals,
+    nglobals: st.nglobals, locals: st.locals, nlocals: st.nlocals};
 
-func with_consts(st, consts) = {code: st.code, consts: consts, globals: st.globals, nglobals: st.nglobals};
+func with_consts(st, consts) = {code: st.code, consts: consts, globals: st.globals,
+    nglobals: st.nglobals, locals: st.locals, nlocals: st.nlocals};
 
-func with_globals(st, globals, nglobals) =
-    {code: st.code, consts: st.consts, globals: globals, nglobals: nglobals};
+func with_globals(st, globals, nglobals) = {code: st.code, consts: st.consts,
+    globals: globals, nglobals: nglobals, locals: st.locals, nlocals: st.nlocals};
 
 // add_constant appends a constant and returns its index and the new state.
 func add_constant(st, c) = {index: len(st.consts), st: with_consts(st, push(st.consts, c))};
@@ -86,7 +115,25 @@ func compile_statements(st, ss, i, n) = match i >= n
 func compile_statement(st, stmt) = match stmt
     Stmt.SUse(path, effect) => compile_use(st, path)
     Stmt.SExpr(e) => compile_expr_statement(st, e)
+    Stmt.SFunc(name, params, constraints, body, is_effect) => compile_function(st, name, params, is_effect, body)
     _ => st;
+
+// A function declaration compiles its body into a FunctionRecord constant and
+// leaves a closure for it in a global.
+func compile_function(st, name, params, is_effect, body) = do
+    inner = with_fresh_locals(st, params);
+    compiled = compile_body(inner, body);
+    listed = add_constant(st, serialize.CFunc(serialize.FunctionRecord(
+        name, "entry", params, compiled.st.nlocals, is_effect, compiled.st.code)));
+    st2 = emit(listed.st, bytecode.ins_u16_u8(bytecode.closure(), listed.index, 0));
+    defined = define_global(st2, name);
+    emit(defined.st, bytecode.ins_u16(bytecode.set_global(), defined.index))
+end;
+
+func compile_body(st, body) = do
+    r = compile_expr(st, body);
+    {e: ast.EWild, st: emit(r.st, bytecode.ins(bytecode.ret()))}
+end;
 
 func compile_use(st, path) = do
     added = add_constant(st, serialize.CStr(path));
@@ -118,10 +165,11 @@ func compile_expr(st, e) = match e
     Expr.EBool(value) => compile_bool(st, value)
     Expr.EIdent(name) => compile_ident(st, name)
     Expr.EMember(object, property) => compile_member(st, object, property)
-    Expr.ECall(fn, args) => compile_call(st, fn, args)
     Expr.EEffectPipe(left, right, secret) => compile_effect_pipe(st, left, right)
     Expr.EPipe(left, right) => compile_pipe(st, left, right)
     Expr.EInfix(op, left, right) => compile_infix(st, op, left, right)
+    Expr.EArray(elements, is_concat) => compile_array(st, elements, is_concat)
+    Expr.ECall(fn, args) => compile_call_or_builtin(st, fn, args)
     _ => {e: ast.EWild, st: st};
 
 // parse_int handles decimal and 0x/0b literals. Digit separators are removed
@@ -191,9 +239,21 @@ func compile_bool(st, value) = match value
     true => {e: ast.EWild, st: emit(st, bytecode.ins(bytecode.true_()))}
     false => {e: ast.EWild, st: emit(st, bytecode.ins(bytecode.false_()))};
 
-func compile_ident(st, name) = match find_global(st.globals, name, 0, len(st.globals))
+func compile_ident(st, name) = match find_local(st.locals, name, 0, len(st.locals))
+    Maybe.Some(index) => {e: ast.EWild, st: emit(st, bytecode.ins_u8(bytecode.get_local(), index))}
+    Maybe.None => compile_global(st, name);
+
+func compile_global(st, name) = match find_global(st.globals, name, 0, len(st.globals))
     Maybe.Some(index) => {e: ast.EWild, st: emit(st, bytecode.ins_u16(bytecode.get_global(), index))}
     Maybe.None => {e: ast.EWild, st: st};
+
+func find_local(locals, name, i, n) = match i >= n
+    true => Maybe.None
+    false => find_local_1(locals, name, i, n);
+
+func find_local_1(locals, name, i, n) = match locals[i].name == name
+    true => Maybe.Some(locals[i].index)
+    false => find_local(locals, name, i + 1, n);
 
 func compile_member(st, object, property) = do
     obj = compile_expr(st, object);
@@ -220,6 +280,52 @@ func compile_pipe(st, left, right) = do
 end;
 
 func compile_effect_pipe(st, left, right) = compile_pipe(st, left, right);
+
+// An array literal pushes its elements then OpArray with the count.
+func compile_array(st, elements, is_concat) = do
+    s1 = compile_args(st, elements, 0, len(elements));
+    op = match is_concat
+        true => bytecode.array_concat()
+        false => bytecode.array();
+    {e: ast.EWild, st: emit(s1, bytecode.ins_u16(op, len(elements)))}
+end;
+
+// A call to a builtin compiles to OpBuiltin with the builtin's index; anything
+// else is an ordinary call. The index order must match the VM's builtin list.
+func compile_call_or_builtin(st, fn, args) = match builtin_index(fn)
+    Maybe.Some(index) => do
+        // OpBuiltin pushes the builtin as a callable; the arguments and the call
+        // follow exactly as for an ordinary function.
+        s1 = emit(st, bytecode.ins_u8(bytecode.builtin(), index));
+        s2 = compile_args(s1, args, 0, len(args));
+        {e: ast.EWild, st: emit(s2, bytecode.ins_u8(bytecode.call(), len(args)))}
+    end
+    Maybe.None => compile_call(st, fn, args);
+
+// builtin_index mirrors the order of the compiler's builtin list, which is also
+// the order the VM registers them in.
+func builtin_index(fn) = match fn
+    Expr.EIdent(name) => builtin_of(name)
+    _ => Maybe.None;
+
+func builtin_of(name) = match name
+    "len" => Maybe.Some(0)
+    "concat" => Maybe.Some(1)
+    "to_string" => Maybe.Some(2)
+    "get" => Maybe.Some(3)
+    "has" => Maybe.Some(4)
+    "head" => Maybe.Some(5)
+    "tail" => Maybe.Some(6)
+    "push" => Maybe.Some(7)
+    "range" => Maybe.Some(8)
+    "map" => Maybe.Some(9)
+    "filter" => Maybe.Some(10)
+    "reduce" => Maybe.Some(11)
+    "keys" => Maybe.Some(12)
+    "values" => Maybe.Some(13)
+    "hash_set" => Maybe.Some(14)
+    "hash_merge" => Maybe.Some(15)
+    _ => Maybe.None;
 
 // Binary arithmetic on two operands. The operand order is left then right, which
 // is what the VM pops.
