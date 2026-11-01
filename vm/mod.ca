@@ -339,8 +339,18 @@ func op_push(st, ip, v) = done(advance(push_value(st, v), ip));
 
 func op_get_local(st, ip) = do
     idx = read_u8(cl_body(frame_cl(current(st))), ip);
-    done(advance(push_value(st, st.stack[frame_base(current(st)) + idx]), ip))
+    done(advance(push_value(st, stack_at(st.stack, frame_base(current(st)) + idx)), ip))
 end;
+
+func ensure_size(arr, n) = match len(arr) >= n
+    true => arr
+    false => ensure_size(push(arr, 0), n);
+
+// stack_at reads a slot, or 0 when it has not been written yet. Local slots are
+// reserved by the call but only filled by the code that assigns them.
+func stack_at(arr, i) = match i >= 0 && i < len(arr)
+    true => arr[i]
+    false => 0;
 
 func op_set_local(st, ip) = do
     idx = read_u8(cl_body(frame_cl(current(st))), ip);
@@ -349,9 +359,12 @@ func op_set_local(st, ip) = do
     done(advance(set_state(r.st, put_at(r.st.stack, target, r.v), r.st.top, r.st.frames, r.st.last, r.st.globals), ip))
 end;
 
+// A global slot can be read before it is written: the compiler predeclares every
+// top-level name so functions can refer to each other, which allocates indices
+// before the assignments that fill them.
 func op_get_global(st, ip) = do
     idx = read_u16(cl_body(frame_cl(current(st))), ip);
-    done(advance(push_value(st, st.globals[idx]), ip))
+    done(advance(push_value(st, stack_at(st.globals, idx)), ip))
 end;
 
 func op_set_global(st, ip) = do
@@ -479,7 +492,16 @@ func op_tail_call(st, ip, nargs) = do
     apply(unwrap_callee(run_callee(st, callee, base, nargs, true), st), ip)
 end;
 
-func unwrap_callee(wrapped, st) = wrapped !? {
+// run_callee is an effect function, so its result is normally wrapped in success.
+// In practice the wrapper is not always present (a match-bodied effect function
+// returns its value directly), and `!?` would then take the failure branch and
+// bury the record. Accepting a plain record first makes this independent of which
+// shape arrives.
+func unwrap_callee(wrapped, st) = match types.is_hash(wrapped)
+    true => wrapped
+    false => unwrap_wrapped_callee(wrapped, st);
+
+func unwrap_wrapped_callee(wrapped, st) = wrapped !? {
     success(v) => v
     failure(e) => failed_callee(st, e)
 };
@@ -502,7 +524,9 @@ func! run_callee(st, callee, base, nargs, tail) = match callee
 func call_closure(st, callee, base, nargs, tail) = do
     locals_count = cl_locals(callee);
     top = base + locals_count;
-    st2 = set_state(st, st.stack, top, st.frames, st.last, st.globals);
+    // Reserve the local slots: they are written by the callee, but reads (and
+    // pops) can happen before that, so the array has to reach `top`.
+    st2 = set_state(st, ensure_size(st.stack, top), top, st.frames, st.last, st.globals);
     match tail
         true => {finished: false, st: set_frame_tail(st2, callee)}
         false => {finished: false, st: push_frame(st2, callee, base)}
@@ -548,10 +572,12 @@ func op_index(st, ip) = do
     done(advance(push_value(obj.st, index_into(obj.v, idx.v)), ip))
 end;
 
+// Indexing a hash yields the value itself, not a Maybe: the compiler emits
+// OpIndex for `h[k]`, and a missing key is an error in the reference.
 func index_into(obj, idx) = match types.is_array(obj)
     true => obj[idx]
     false => match types.is_hash(obj)
-        true => get(obj, idx)
+        true => get(obj, idx, 0)
         false => obj;
 
 func op_get_member(st, ip) = do
