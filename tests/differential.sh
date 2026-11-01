@@ -203,6 +203,69 @@ run_fmt() {
     done
 }
 
+# --- Stage 4: the self-hosted VM ---------------------------------------------
+# Compiles with the self-hosted compiler and runs the result on the self-hosted
+# interpreter, comparing against the reference.
+#
+# Files outside the VM's scope, with the reason:
+#   async_*.ca     need the event scheduler: the reference runs it on goroutines
+#                  and channels, and supplies event sources such as
+#                  schedule.timeout natively. Reimplementing that in Calcium is
+#                  the open question D2; the interpreter does not attempt it.
+#   constraint.ca  needs the static constraint checker (D13).
+#
+# The stage is limited to examples/: the tests/*.test.ca files import the local
+# `test` module, and loading a local module is a host facility the interpreter
+# cannot reach (`use` names are resolved by the reference loader, not by Calcium).
+vm_corpus() {
+    find "$CALCIUM_LANG/examples" -name '*.ca' | sort
+}
+
+vm_excluded() {
+    case "$(basename "$1")" in
+        async_*.ca|constraint.ca) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+run_vm() {
+    if ! have_component vm; then
+        echo "skip vm (self-hosted VM not implemented)"
+        skip=$((skip + 1))
+        return 0
+    fi
+    local files f out_oracle out_cand st_oracle st_cand
+    out_oracle="$WORK/vm-oracle.out"
+    out_cand="$WORK/vm-cand.out"
+    mapfile -t files < <(vm_corpus)
+    for f in "${files[@]}"; do
+        if vm_excluded "$f"; then
+            excluded=$((excluded + 1))
+            continue
+        fi
+        ( cd "$CALCIUM_LANG" && "$ORACLE" "$f" ) >"$out_oracle" 2>&1
+        st_oracle=$?
+        if [[ $st_oracle -ne 0 ]]; then
+            excluded=$((excluded + 1))
+            continue
+        fi
+        candidate run "$f" </dev/null >"$out_cand" 2>&1
+        st_cand=$?
+        if [[ $st_oracle -ne $st_cand ]]; then
+            {
+                echo "exit status: oracle=$st_oracle candidate=$st_cand"
+                echo "--- oracle output ---"; head -20 "$out_oracle"
+                echo "--- candidate output ---"; head -20 "$out_cand"
+            } >"$WORK/vm.diff"
+            fail_case "vm: $f" "$WORK/vm.diff"
+        elif diff -u "$out_oracle" "$out_cand" >"$WORK/vm.diff" 2>&1; then
+            pass=$((pass + 1))
+        else
+            fail_case "vm: $f" "$WORK/vm.diff"
+        fi
+    done
+}
+
 # --- Stage 3: compiler --------------------------------------------------------
 # Behaviour is compared, not bytes: run the oracle's output and the candidate's
 # output and compare stdout, and whether each succeeded.
@@ -287,6 +350,7 @@ run_check
 run_lex
 run_fmt
 run_compile
+run_vm
 
 echo
 if [[ $fail -eq 0 ]]; then

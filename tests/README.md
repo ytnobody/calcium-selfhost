@@ -19,6 +19,7 @@ ORACLE=/tmp/calcium CALCIUM_LANG=../calcium-lang bash tests/differential.sh
 | formatter | `calcium fmt` output per corpus file | byte-identical |
 | formatter | `calcium fmt` output, on a copy of each corpus file | byte-identical |
 | compiler | compile with the candidate, run the result on the reference VM | same stdout, same exit status |
+| VM | run with the candidate VM (`main.ca run`) | same stdout, same exit status |
 
 The compiler stage runs both sides from the corpus root, because the reference
 resolves local modules relative to the working directory when it runs a `.bone`,

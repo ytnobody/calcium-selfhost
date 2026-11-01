@@ -34,6 +34,18 @@ SH-2 progress:
   repositories.
 - **type checker** — done, verified against twelve fixtures with `calcium check`; see D13.
 
+SH-4 progress: the interpreter is wired into the harness and matches the reference
+on the nine examples it supports. Its boundary is explicit rather than accidental:
+
+- **Not supported, by decision:** the six async examples. The reference schedules
+  them on goroutines and channels and supplies event sources such as
+  `schedule.timeout` natively; reimplementing that in Calcium is the open question
+  D2. The interpreter does not attempt it.
+- **Not supported:** loading a *local* module (`use test;` in tests/*.test.ca).
+  `use` is resolved by the host loader, which Calcium cannot reach, so the stage is
+  limited to examples/.
+- **Also out of reach:** `constraint.ca`, which needs the static constraint checker.
+
 SH-3 progress: the compiler emits .bone that behaves like the reference on every
 comparable corpus file (100 comparisons pass). Three files are excluded: two
 because the reference itself cannot be compared (async_spawn is
@@ -45,7 +57,7 @@ Known grammar gaps, not exercised by the corpus: `Secret.with(cap) { ... }`
 blocks are not parsed (they degrade to wildcards), and no test covers a match
 whose arms are all constructor patterns of an empty type.
 | SH-3 | compiler emitting `.bone` | programs compiled by the candidate run identically under the reference VM over the corpus |
-| SH-4 | bytecode VM | the candidate VM runs the corpus itself (stretch goal) |
+| SH-4 | bytecode VM | the candidate VM runs the examples itself (stretch goal) |
 
 SH-3 is the point at which the toolchain is self-hosted in practice.
 
