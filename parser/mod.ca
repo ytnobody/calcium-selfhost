@@ -32,6 +32,7 @@ func peek2_kind(toks) = kind(rest(rest(toks)));
 func peek3_kind(toks) = kind(rest(rest(rest(toks))));
 
 func is_kind(toks, k) = kind(toks) == k;
+func at_end(toks) = is_kind(toks, "EOF");
 func peek_is(toks, k) = peek_kind(toks) == k;
 
 // starts_upper reports whether a name starts with an upper-case letter, which is
@@ -103,8 +104,15 @@ func parse_statements(toks, acc) = match kind(toks)
 
 func parse_statements_next(toks, acc) = do
     r = parse_statement(toks)
-    parse_statements(r.t, push(acc, r.s))
+    after = match same_pos(r.t, toks)
+        true => rest(toks)
+        false => r.t
+    parse_statements(after, push(acc, r.s))
 end;
+
+// same_pos reports whether two cursors point at the same token, which is how a
+// parser that consumed nothing is detected.
+func same_pos(a, b) = cur(a).line == cur(b).line && cur(a).column == cur(b).column && cur(a).kind == cur(b).kind;
 
 func parse_statement(toks) = match kind(toks)
     "USE" => parse_use(toks)
@@ -182,7 +190,7 @@ end;
 // parse_params reads `(a, b: C?, c)`.
 func parse_params(toks) = parse_params_from(rest(toks), [], []);
 
-func parse_params_from(toks, names, constraints) = match is_kind(toks, ")")
+func parse_params_from(toks, names, constraints) = match is_kind(toks, ")") || at_end(toks)
     true => {names: names, constraints: constraints, t: rest(toks)}
     false => parse_params_one(toks, names, constraints);
 
@@ -250,7 +258,7 @@ func parse_variant_fields(toks) = match is_kind(toks, "(")
     true => parse_variant_fields_from(rest(toks), [])
     false => {fields: [], t: toks};
 
-func parse_variant_fields_from(toks, acc) = match is_kind(toks, ")")
+func parse_variant_fields_from(toks, acc) = match is_kind(toks, ")") || at_end(toks)
     true => {fields: acc, t: rest(toks)}
     false => parse_variant_fields_one(toks, acc);
 
@@ -271,7 +279,7 @@ func parse_constraint_decl(toks) = do
     {s: ast.SConstraint(name, params.names, r.e), t: after}
 end;
 
-func parse_constraint_params(toks, acc) = match is_kind(toks, ")")
+func parse_constraint_params(toks, acc) = match is_kind(toks, ")") || at_end(toks)
     true => {names: acc, t: rest(toks)}
     false => parse_constraint_params_one(toks, acc);
 
@@ -317,7 +325,7 @@ func parse_array_destr(toks) = do
     {s: ast.SArrayDestr(names.names, r.e), t: eat_semicolon(r.t)}
 end;
 
-func parse_destr_names(toks, acc) = match is_kind(toks, "]")
+func parse_destr_names(toks, acc) = match is_kind(toks, "]") || at_end(toks)
     true => {names: acc, t: rest(toks)}
     false => parse_destr_names_one(toks, acc);
 
@@ -383,7 +391,10 @@ func parse_prefix(toks) = match kind(toks)
     "RETURN" => parse_return(toks)
     "DO" => parse_do(toks)
     "STRING_TEMPLATE_START" => parse_interpolated(toks)
-    _ => res(ast.EWild, toks);
+    // Unrecognised token: consume it so the enclosing loop always advances. A
+    // wildcard is the least surprising placeholder, and the formatter prints it
+    // as `_`, which makes the gap visible instead of hanging.
+    _ => res(ast.EWild, rest(toks));
 
 func parse_prefix_op(toks) = do
     op = lit(toks)
@@ -438,7 +449,7 @@ end;
 
 func parse_array(toks) = parse_array_items(rest(toks), [], false);
 
-func parse_array_items(toks, acc, is_concat) = match is_kind(toks, "]")
+func parse_array_items(toks, acc, is_concat) = match is_kind(toks, "]") || at_end(toks)
     true => res(ast.EArray(acc, is_concat), rest(toks))
     false => parse_array_item(toks, acc, is_concat);
 
@@ -452,7 +463,7 @@ end;
 
 func parse_hash(toks) = parse_hash_pairs(rest(toks), []);
 
-func parse_hash_pairs(toks, acc) = match is_kind(toks, "}")
+func parse_hash_pairs(toks, acc) = match is_kind(toks, "}") || at_end(toks)
     true => res(ast.EHash(acc), rest(toks))
     false => parse_hash_pair(toks, acc);
 
@@ -566,7 +577,7 @@ func parse_ctor_pattern(toks, type_name) = do
     parse_ctor_fields(type_name, name, rest(rest(toks)), [])
 end;
 
-func parse_ctor_fields(type_name, name, toks, acc) = match is_kind(toks, ")")
+func parse_ctor_fields(type_name, name, toks, acc) = match is_kind(toks, ")") || at_end(toks)
     true => res(ast.EConstructorPattern(type_name, name, acc), rest(toks))
     false => parse_ctor_field(type_name, name, toks, acc);
 
@@ -601,7 +612,7 @@ func parse_infix_for(left, toks, min_prec) = match kind(toks)
     _ => infix_binary(left, toks);
 
 // `f(a, b)`
-func parse_call_tail(fn, toks, acc) = match is_kind(toks, ")")
+func parse_call_tail(fn, toks, acc) = match is_kind(toks, ")") || at_end(toks)
     true => res(ast.ECall(fn, acc), rest(toks))
     false => parse_call_arg(fn, toks, acc);
 
@@ -664,7 +675,7 @@ end;
 // compiler see them.
 func parse_do(toks) = split_do(parse_do_body(rest(toks), []));
 
-func parse_do_body(toks, acc) = match kind(toks) == "end"
+func parse_do_body(toks, acc) = match kind(toks) == "end" || at_end(toks)
     true => {ss: acc, t: rest(toks)}
     false => parse_do_statement(toks, acc);
 
