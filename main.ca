@@ -3,6 +3,7 @@ use core.os!;
 use core.string;
 use core.array;
 use lexer;
+use parser;
 
 // calcium-selfhost CLI entry point.
 //
@@ -20,8 +21,8 @@ func usage_lines() = [
     "commands:",
     "  version                   print the candidate version",
     "  lex <in>                  dump the token stream",
+    "  parse <in>                dump the AST summary (debugging only)",
     "  fmt <in> -o <out>         format <in> into <out>",
-    "  parse <in>                dump the AST (debugging only)",
     "  compile <in> -o <out>     compile <in> into <out> (.bone)"
 ];
 
@@ -93,6 +94,24 @@ func lex_run(path) = do
 end;
 
 // ---------------------------------------------------------------------------
+// parse
+// ---------------------------------------------------------------------------
+
+// parse_file reports how many statements the input parses into. It is a
+// debugging aid: the AST dump format is not part of the compatibility contract.
+func parse_file(path) = do
+    src = read_source(path)
+    toks = lexer.tokenize(src)
+    result = parser.parse_program(toks)
+    concat("# statements: ", to_string(len(result.statements))) !> io.say
+end;
+
+func read_source(path) = io.read_file(path) !? {
+    success(v) => v
+    failure(e) => ""
+};
+
+// ---------------------------------------------------------------------------
 // dispatch
 // ---------------------------------------------------------------------------
 
@@ -103,6 +122,7 @@ args = os.args();
 match get(args, 2)
     Maybe.Some("version") => concat("calcium-selfhost ", version()) !> io.say
     Maybe.Some("lex") => lex_file(get(args, 3, ""))
+    Maybe.Some("parse") => parse_file(get(args, 3, ""))
     Maybe.Some("help") => usage() !> io.say
     Maybe.Some(cmd) => unimplemented(cmd)
     Maybe.None => do

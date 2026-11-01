@@ -1,0 +1,91 @@
+// ast - syntax tree for the self-hosted front end.
+//
+// The shapes are chosen to make formatting exact, not to mirror the reference
+// implementation's Go structs: integers and floats keep their source text, so
+// `0xFF` and `1_000` survive formatting unchanged, while strings keep their
+// decoded value, so `'a'` and `"a"` both format as `"a"`.
+//
+// Variant names are prefixed (E… for expressions, S… for statements) because a
+// module has one flat constructor namespace. Patterns elsewhere use the bare
+// names (`Num(n)`) or type-qualified ones (`Expr.Num(n)`).
+
+namespace ast;
+
+// ---------------------------------------------------------------------------
+// Expressions
+// ---------------------------------------------------------------------------
+
+type Expr =
+    EIdent(name) |
+    EWild |
+    EInt(raw) |
+    EFloat(raw) |
+    EStr(value) |
+    EInterp(parts) |
+    ERegex(text) |
+    EBool(value) |
+    ETuple(elements) |
+    EArray(elements, is_concat) |
+    EHash(pairs) |
+    EPrefix(op, right) |
+    EInfix(op, left, right) |
+    ECall(fn, args) |
+    EIndex(left, index) |
+    EMember(object, property) |
+    ELambda(params, body) |
+    EPipe(left, right) |
+    EEffectPipe(left, right, allow_secret) |
+    EErrorPipe(left, right) |
+    ESpread(value) |
+    EMatch(subject, cases) |
+    EEffectHandle(subject, success_var, success_body, failure_var, failure_body) |
+    ESuccess(value) |
+    EFailure(value) |
+    EReturn(value) |
+    EConstraintCheck(constraint) |
+    EDo(statements, final) |
+    ESecretWith(capability, statements, final) |
+    EStay(state_init, body) |
+    EModulePath(text) |
+    EConstructorPattern(type_name, name, fields);
+
+// Case is one arm of a match. `pattern` is an Expr: a binding identifier, a
+// wildcard, a constructor pattern, or a literal.
+type Case = Case(pattern, guard, body, is_default);
+
+// HashPair is one key/value entry of a hash literal.
+type HashPair = HashPair(key, value);
+
+// StatePair is one `name: value` entry of async.stay's initial state.
+type StatePair = StatePair(name, value);
+
+// ---------------------------------------------------------------------------
+// Statements
+// ---------------------------------------------------------------------------
+
+type Stmt =
+    SUse(path, is_effect) |
+    SNamespace(path) |
+    SAssign(name, value) |
+    SArrayDestr(names, value) |
+    SHeadTailDestr(head, tail, value) |
+    SFunc(name, params, constraints, body, is_effect) |
+    SConstraint(name, params, body) |
+    SType(name, variants) |
+    SExpr(expression);
+
+// Variant is one case of a `type` declaration.
+type Variant = Variant(name, fields);
+
+// ---------------------------------------------------------------------------
+// Constructors
+// ---------------------------------------------------------------------------
+
+func ident(name) = EIdent(name);
+func int_lit(raw) = EInt(raw);
+func float_lit(raw) = EFloat(raw);
+func str_lit(value) = EStr(value);
+func bool_lit(value) = EBool(value);
+func wild() = EWild;
+func empty_statements() = [];
+func empty_exprs() = [];
