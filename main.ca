@@ -152,14 +152,77 @@ end;
 // run_file compiles the input with the self-hosted compiler and executes the
 // result on the self-hosted VM. Modules are provided by the VM's own registry,
 // so only programs using `core.io` can produce output.
+// run_file compiles and runs the program on the self-hosted VM. Local modules
+// (`use test;`) are loaded here rather than by the host: the loader reads the
+// module source, compiles it with the self-hosted compiler, runs its top-level
+// code on the same VM, and exposes its globals as the module's exports.
 func! run_file(path) = do
     src = read_source(path)
     parsed = parser.parse_program(lexer.tokenize(src))
     st = compiler.compile_program(parsed.statements)
     match len(st.errors) == 0
-        true => vm.run(st.consts, st.code)
+        true => do
+            mods = load_local_modules(use_paths(parsed.statements, 0, len(parsed.statements), []),
+                0, len(use_paths(parsed.statements, 0, len(parsed.statements), [])), dir_of(path), {});
+            vm.run_with_modules(st.consts, st.code, mods)
+        end
         false => report_compile_errors(path, st.errors, 0, len(st.errors))
 end;
+
+// use_paths collects the module paths a program imports.
+func use_paths(ss, i, n, acc) = match i >= n
+    true => acc
+    false => use_paths(ss, i + 1, n, add_use_path(ss[i], acc));
+
+func add_use_path(stmt, acc) = match stmt
+    Stmt.SUse(path, is_effect) => match is_core_path(path)
+        true => acc
+        false => push(acc, path)
+    _ => acc;
+
+func is_core_path(path) = string.starts_with(path, "core.");
+
+func dir_of(path) = do
+    parts = string.split(path, "/");
+    dir_of_parts(parts, len(parts) - 1, "");
+end;
+
+func dir_of_parts(parts, i, acc) = match i <= 0
+    true => match acc == ""
+        true => "."
+        false => string.substring(acc, 0, len(acc) - 1)
+    false => dir_of_parts(parts, i - 1, concat(parts[i - 1], "/", acc));
+
+func! load_local_modules(paths, i, n, source_dir, mods) = match i >= n
+    true => mods
+    false => load_local_modules(paths, i + 1, n, source_dir, load_one_module(paths[i], source_dir, mods));
+
+func! load_one_module(path, source_dir, mods) = do
+    file = concat(source_dir, "/", path, "/mod.ca");
+    src = read_source(file);
+    match src == ""
+        true => mods
+        false => do
+            parsed = parser.parse_program(lexer.tokenize(src));
+            st = compiler.compile_program(parsed.statements);
+            match len(st.errors) > 0
+                true => mods
+                false => do
+                    ran = vm.run_module(st.consts, st.code, mods);
+                    hash_set(mods, path, exports_hash(st.globals, ran.globals, 0, len(st.globals), {}))
+                end
+        end
+end;
+
+// exports_hash turns the module's globals into a namespace: name -> value.
+func exports_hash(names, globals, i, n, acc) = match i >= n
+    true => acc
+    false => exports_hash(names, globals, i + 1, n,
+        hash_set(acc, names[i].name, globals_value(globals, names[i].index)));
+
+func globals_value(globals, index) = match index < len(globals)
+    true => globals[index]
+    false => 0;
 
 // check_file prints one finding per line as `<line>:<column>\ttype`, matching
 // `calcium check`.

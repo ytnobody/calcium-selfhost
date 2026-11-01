@@ -38,10 +38,17 @@ type Value =
 type Frame = Frame(cl, ip, base);
 
 // State: operand stack, frames, globals, constant pool.
-func new_state(constants) = {stack: [], top: 0, frames: [], last: 0, globals: [], constants: constants};
+// `modules` maps a module path to its exports, for local modules the loader has
+// already compiled. Paths without an entry fall back to the native registry.
+func new_state(constants) = {stack: [], top: 0, frames: [], last: 0, globals: [], constants: constants, modules: {}};
 
 func set_state(st, stack, top, frames, last, globals) =
-    {stack: stack, top: top, frames: frames, last: last, globals: globals, constants: st.constants};
+    {stack: stack, top: top, frames: frames, last: last, globals: globals,
+     constants: st.constants, modules: st.modules};
+
+func with_modules(st, modules) =
+    {stack: st.stack, top: st.top, frames: st.frames, last: st.last, globals: st.globals,
+     constants: st.constants, modules: modules};
 
 // ---------------------------------------------------------------------------
 // Operand stack
@@ -248,11 +255,25 @@ func cl_free(cl) = match cl
 // Interpreter
 // ---------------------------------------------------------------------------
 
-func run(constants, instructions) = do
+func run(constants, instructions) = run_with_modules(constants, instructions, {});
+
+func run_with_modules(constants, instructions, modules) = do
     main = Closure(serialize.FunctionRecord("<main>", "entry", [], 0, false, instructions), []);
-    st = push_frame(new_state(constants), main, 0);
+    st = push_frame(with_modules(new_state(constants), modules), main, 0);
     exec(st)
 end;
+
+// run_module executes a module's top-level code and returns the resulting state,
+// whose globals hold the module's exports.
+func run_module(constants, instructions, modules) = do
+    main = Closure(serialize.FunctionRecord("<module>", "entry", [], 0, false, instructions), []);
+    st = push_frame(with_modules(new_state(constants), modules), main, 0);
+    exec_state(st)
+end;
+
+func exec_state(st) = match len(st.frames) == 0
+    true => st
+    false => exec_state(step(st));
 
 // exec is tail-recursive: one step per instruction, so a long program does not
 // grow the stack.
@@ -705,10 +726,16 @@ func module_or_hash(obj, name) = match get(obj, "__module", "")
     "" => get(obj, name, 0)
     _ => module_member(get(obj, "__module", ""), name);
 
+// A local module the loader prepared is pushed directly; anything else keeps the
+// path marker so member access can reach the native registry.
 func op_load_module(st, ip) = do
     path = member_name(st, read_u16(cl_body(frame_cl(current(st))), ip));
-    done(advance(push_value(st, {"__module": path}), ip))
+    done(advance(push_value(st, module_value(st, path)), ip))
 end;
+
+func module_value(st, path) = match has(st.modules, path)
+    true => get(st.modules, path)
+    false => {"__module": path};
 
 func op_builtin(st, ip, index) = done(advance(push_value(st, BuiltinFn(index)), ip));
 
@@ -970,11 +997,23 @@ func concat_values_loop(args, i, n, acc) = match i >= n
 // Calcium's `success`/`failure` cannot be destructured, and an effect function
 // with a match body is not wrapped, so neither `!?` nor a plain read is reliable
 // across both shapes; result_record accepts either.
+// Module members that take a callback must be implemented here, not forwarded:
+// the host's higher-order functions cannot call the interpreter's closures.
 func! call_host(st, name, base, nargs) = do
     r = pop_n(st, nargs);
-    result = result_record(host_apply(name, r.items)).v;
     remaining = set_state(r.st, r.st.stack, base - 1, r.st.frames, r.st.last, r.st.globals);
-    {finished: true, st: remaining, v: result}
+    match name
+        "core.array:find" => higher_order_find(remaining, r.items)
+        "core.array:find_index" => higher_order_find_index(remaining, r.items)
+        "core.array:count" => higher_order_count(remaining, r.items)
+        "core.array:any" => higher_order_any(remaining, r.items, false)
+        "core.array:all" => higher_order_any(remaining, r.items, true)
+        _ => call_host_forward(remaining, name, r.items)
+end;
+
+func! call_host_forward(st, name, items) = do
+    result = result_record(host_apply(name, items)).v;
+    {finished: true, st: st, v: result}
 end;
 
 // call_n applies a function value to an argument array. The spread form
@@ -1119,3 +1158,83 @@ func join_values(items, i, n, acc) = match i >= n
 func value_sep(i) = match i == 0
     true => ""
     false => ", ";
+
+// ---------------------------------------------------------------------------
+// Array members that take a callback
+//
+// These cannot be forwarded to the host: the host's higher-order functions call
+// back into native closures, and the interpreter's closures are its own values.
+// ---------------------------------------------------------------------------
+
+func higher_order_find(st, items) = match len(items) == 2 && types.is_array(items[0])
+    true => do
+        r = find_loop(st, items[1], items[0], 0, len(items[0]));
+        {finished: true, st: r.st, v: r.v}
+    end
+    false => {finished: true, st: st, v: failure("find: expected 2 arguments (array, pred)")};
+
+func find_loop(st, pred, arr, i, n) = match i >= n
+    true => {st: st, v: Maybe.None}
+    false => find_step(st, pred, arr, i, n);
+
+func find_step(st, pred, arr, i, n) = do
+    r = call_sync(st, pred, [arr[i]]);
+    match r.v
+        true => {st: r.st, v: Maybe.Some(arr[i])}
+        _ => find_loop(r.st, pred, arr, i + 1, n)
+end;
+
+func higher_order_find_index(st, items) = match len(items) == 2 && types.is_array(items[0])
+    true => do
+        r = find_index_loop(st, items[1], items[0], 0, len(items[0]));
+        {finished: true, st: r.st, v: r.v}
+    end
+    false => {finished: true, st: st, v: -1};
+
+func find_index_loop(st, pred, arr, i, n) = match i >= n
+    true => {st: st, v: -1}
+    false => find_index_step(st, pred, arr, i, n);
+
+func find_index_step(st, pred, arr, i, n) = do
+    r = call_sync(st, pred, [arr[i]]);
+    match r.v
+        true => {st: r.st, v: i}
+        _ => find_index_loop(r.st, pred, arr, i + 1, n)
+end;
+
+func higher_order_count(st, items) = match len(items) == 2 && types.is_array(items[0])
+    true => do
+        r = count_loop(st, items[1], items[0], 0, len(items[0]), 0);
+        {finished: true, st: r.st, v: r.n}
+    end
+    false => {finished: true, st: st, v: 0};
+
+func count_loop(st, pred, arr, i, n, acc) = match i >= n
+    true => {st: st, n: acc}
+    false => do
+        r = call_sync(st, pred, [arr[i]]);
+        count_loop(r.st, pred, arr, i + 1, n, bump(r.v, acc))
+    end;
+
+func bump(v, acc) = match v
+    true => acc + 1
+    _ => acc;
+
+// any and all share a loop: `want_all` flips which result short-circuits.
+func higher_order_any(st, items, want_all) = match len(items) == 2 && types.is_array(items[0])
+    true => do
+        r = any_loop(st, items[1], items[0], 0, len(items[0]), want_all);
+        {finished: true, st: r.st, v: r.v}
+    end
+    false => {finished: true, st: st, v: !want_all};
+
+func any_loop(st, pred, arr, i, n, want_all) = match i >= n
+    true => {st: st, v: want_all}
+    false => any_step(st, pred, arr, i, n, want_all);
+
+func any_step(st, pred, arr, i, n, want_all) = do
+    r = call_sync(st, pred, [arr[i]]);
+    match r.v == want_all
+        false => {st: r.st, v: !want_all}
+        _ => any_loop(r.st, pred, arr, i + 1, n, want_all)
+end;
