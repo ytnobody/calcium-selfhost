@@ -182,24 +182,30 @@ func add_use_path(stmt, acc) = match stmt
 
 func is_core_path(path) = string.starts_with(path, "core.");
 
+// dir_of keeps the leading empty component of an absolute path: joining from the
+// front preserves the first "/" that splitting produced.
 func dir_of(path) = do
     parts = string.split(path, "/");
-    dir_of_parts(parts, len(parts) - 1, "");
+    dir_of_prefix(parts, 0, len(parts) - 1, "")
 end;
 
-func dir_of_parts(parts, i, acc) = match i <= 0
+func dir_of_prefix(parts, i, n, acc) = match i >= n
     true => match acc == ""
         true => "."
-        false => string.substring(acc, 0, len(acc) - 1)
-    false => dir_of_parts(parts, i - 1, concat(parts[i - 1], "/", acc));
+        false => acc
+    false => dir_of_prefix(parts, i + 1, n, append_part(acc, parts[i], i));
 
-func! load_local_modules(paths, i, n, source_dir, mods) = match i >= n
+func append_part(acc, part, i) = match i == 0
+    true => part
+    false => concat(acc, "/", part);
+
+func load_local_modules(paths, i, n, source_dir, mods) = match i >= n
     true => mods
     false => load_local_modules(paths, i + 1, n, source_dir, load_one_module(paths[i], source_dir, mods));
 
 // A local module is resolved like the reference does for a source file: from the
 // file's directory and from its parent (the project root for tests/*.test.ca).
-func! load_one_module(path, source_dir, mods) = do
+func load_one_module(path, source_dir, mods) = do
     file = module_file(source_dir, path);
     src = read_source(file);
     match src == ""
@@ -216,7 +222,7 @@ func! load_one_module(path, source_dir, mods) = do
         end
 end;
 
-func! module_file(source_dir, path) = do
+func module_file(source_dir, path) = do
     first = concat(source_dir, "/", path, "/mod.ca");
     match io.exists(first)
         true => first
