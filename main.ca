@@ -5,6 +5,8 @@ use core.array;
 use lexer;
 use parser;
 use formatter;
+use compiler;
+use serialize;
 
 // calcium-selfhost CLI entry point.
 //
@@ -117,6 +119,16 @@ func fmt_file(argv) = do
     io.write_file(output, formatter.format_program(parsed.statements))
 end;
 
+// compile_file writes a .bone for the input. The reference VM runs it.
+func compile_file(argv) = do
+    input = get(argv, 3, "")
+    output = get(argv, 5, "")
+    src = read_source(input)
+    parsed = parser.parse_program(lexer.tokenize(src))
+    st = compiler.compile_program(parsed.statements)
+    io.write_file(output, serialize.to_string_bytes(compiler.to_bone(st)))
+end;
+
 func read_source(path) = io.read_file(path) !? {
     success(v) => v
     failure(e) => ""
@@ -135,6 +147,7 @@ match get(args, 2)
     Maybe.Some("lex") => lex_file(get(args, 3, ""))
     Maybe.Some("parse") => parse_file(get(args, 3, ""))
     Maybe.Some("fmt") => fmt_file(args)
+    Maybe.Some("compile") => compile_file(args)
     Maybe.Some("help") => usage() !> io.say
     Maybe.Some(cmd) => unimplemented(cmd)
     Maybe.None => do

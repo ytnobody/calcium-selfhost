@@ -68,10 +68,10 @@ func concat_into(acc, b, i, n) = match i >= n
 // ---------------------------------------------------------------------------
 
 func encode_constant(c) = match c
-    C.Bool(value) => concat_bytes(u8(_TAG_BOOL), u8(bool_byte(value)))
-    C.Int(value) => concat_bytes(u8(_TAG_INT), i64_bytes(value))
-    C.Str(value) => concat_bytes(u8(_TAG_STRING), str_bytes(value))
-    C.Func(record) => concat_bytes(u8(_TAG_FUNCTION), encode_function(record))
+    Constant.CBool(value) => concat_bytes(u8(_TAG_BOOL), u8(bool_byte(value)))
+    Constant.CInt(value) => concat_bytes(u8(_TAG_INT), i64_bytes(value))
+    Constant.CStr(value) => concat_bytes(u8(_TAG_STRING), str_bytes(value))
+    Constant.CFunc(record) => concat_bytes(u8(_TAG_FUNCTION), encode_function(record))
     _ => [];
 
 func bool_byte(value) = match value

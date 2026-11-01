@@ -1,10 +1,256 @@
-// compiler - AST to .bone bytecode (SH-3).
+// compiler - AST to bytecode.
 //
-// Not implemented yet. See ../SPEC.md and
-// calcium-lang/specs/selfhost-scope.md for the stage plan and scope.
+// A pure state machine: the constant pool, the instruction stream and the global
+// symbol table are threaded through every function instead of being mutated.
+//
+// This is the first slice: literals, identifiers, member access, calls and the
+// effect pipe — enough to compile and run
+//
+//	use core.io!;
+//	"hi" !> io.say;
+//
+// The emitted instructions follow the reference implementation's conventions so
+// that the resulting .bone runs unchanged on the reference VM.
 
 namespace compiler;
 
-// implemented reports whether this component exists yet. The differential
-// harness uses it to decide which comparisons it can run.
-func implemented() = false;
+use core.array;
+use core.string;
+use core.types;
+use ast;
+use bytecode;
+use serialize;
+
+// A state record holds everything the compiler accumulates.
+//   code     instruction bytes
+//   consts   constant pool (serialize.Constant values)
+//   globals  [{name, index}] for global symbols
+//   nglobals next free global index
+func new_state() = {code: [], consts: [], globals: [], nglobals: 0};
+
+// ---------------------------------------------------------------------------
+// Emitting
+// ---------------------------------------------------------------------------
+
+func emit(st, bytes) = with_code(st, concat_arr(st.code, bytes));
+
+func with_code(st, code) = {code: code, consts: st.consts, globals: st.globals, nglobals: st.nglobals};
+
+func with_consts(st, consts) = {code: st.code, consts: consts, globals: st.globals, nglobals: st.nglobals};
+
+func with_globals(st, globals, nglobals) =
+    {code: st.code, consts: st.consts, globals: globals, nglobals: nglobals};
+
+// add_constant appends a constant and returns its index and the new state.
+func add_constant(st, c) = {index: len(st.consts), st: with_consts(st, push(st.consts, c))};
+
+func concat_arr(a, b) = append_into(copy_arr(a, 0, len(a), []), b, 0, len(b));
+
+func copy_arr(a, i, n, acc) = match i >= n
+    true => acc
+    false => copy_arr(a, i + 1, n, push(acc, a[i]));
+
+func append_into(acc, b, i, n) = match i >= n
+    true => acc
+    false => append_into(push(acc, b[i]), b, i + 1, n);
+
+// ---------------------------------------------------------------------------
+// Symbols
+//
+// A flat association list is enough: programs have tens of globals, and lookup
+// happens once per identifier.
+// ---------------------------------------------------------------------------
+
+func find_global(globals, name, i, n) = match i >= n
+    true => Maybe.None
+    false => find_global_1(globals, name, i, n);
+
+func find_global_1(globals, name, i, n) = match globals[i].name == name
+    true => Maybe.Some(globals[i].index)
+    false => find_global(globals, name, i + 1, n);
+
+func define_global(st, name) = match find_global(st.globals, name, 0, len(st.globals))
+    Maybe.Some(index) => {index: index, st: st}
+    Maybe.None => {index: st.nglobals, st: with_globals(st, push(st.globals, {name: name, index: st.nglobals}), st.nglobals + 1)};
+
+// ---------------------------------------------------------------------------
+// Program
+// ---------------------------------------------------------------------------
+
+func compile_program(statements) = compile_statements(new_state(), statements, 0, len(statements));
+
+func compile_statements(st, ss, i, n) = match i >= n
+    true => st
+    false => compile_statements(compile_statement(st, ss[i]), ss, i + 1, n);
+
+func compile_statement(st, stmt) = match stmt
+    Stmt.SUse(path, effect) => compile_use(st, path)
+    Stmt.SExpr(e) => compile_expr_statement(st, e)
+    _ => st;
+
+func compile_use(st, path) = do
+    added = add_constant(st, serialize.CStr(path));
+    st2 = emit(added.st, bytecode.ins_u16(bytecode.load_module(), added.index));
+    name = module_name(path);
+    defined = define_global(st2, name);
+    emit(defined.st, bytecode.ins_u16(bytecode.set_global(), defined.index))
+end;
+
+// module_name is the last dotted component: `core.io` binds as `io`.
+func module_name(path) = module_name_from(string.split(path, "."), 0, len(string.split(path, ".")), "");
+
+func module_name_from(parts, i, n, acc) = match i >= n
+    true => acc
+    false => module_name_from(parts, i + 1, n, parts[i]);
+
+func compile_expr_statement(st, e) = do
+    r = compile_expr(st, e);
+    emit(r.st, bytecode.ins(bytecode.pop()))
+end;
+
+// ---------------------------------------------------------------------------
+// Expressions
+// ---------------------------------------------------------------------------
+
+func compile_expr(st, e) = match e
+    Expr.EStr(value) => compile_const(st, serialize.CStr(value))
+    Expr.EInt(raw) => compile_const(st, serialize.CInt(parse_int(raw)))
+    Expr.EBool(value) => compile_bool(st, value)
+    Expr.EIdent(name) => compile_ident(st, name)
+    Expr.EMember(object, property) => compile_member(st, object, property)
+    Expr.ECall(fn, args) => compile_call(st, fn, args)
+    Expr.EEffectPipe(left, right, secret) => compile_effect_pipe(st, left, right)
+    Expr.EPipe(left, right) => compile_pipe(st, left, right)
+    Expr.EInfix(op, left, right) => compile_infix(st, op, left, right)
+    _ => {e: ast.EWild, st: st};
+
+// parse_int handles decimal and 0x/0b literals. Digit separators are removed
+// first, and a non-decimal literal is converted through its digits because
+// types.to_int only parses decimal text.
+func parse_int(raw) = parse_int_clean(remove_underscores(raw, 0, len(raw), ""));
+
+func remove_underscores(s, i, n, acc) = match i >= n
+    true => acc
+    false => remove_underscores_1(s, i, n, acc, string.char_at(s, i));
+
+func remove_underscores_1(s, i, n, acc, ch) = match ch
+    Maybe.Some(c) => remove_underscores(s, i + 1, n, match c == "_"
+        true => acc
+        false => concat(acc, c))
+    Maybe.None => acc;
+
+func parse_int_clean(s) = match string.starts_with(s, "0x") || string.starts_with(s, "0X")
+    true => parse_radix(string.substring_from(s, 2), 16, 0, 0)
+    false => parse_int_dec(s);
+
+func parse_int_dec(s) = match string.starts_with(s, "0b") || string.starts_with(s, "0B")
+    true => parse_radix(string.substring_from(s, 2), 2, 0, 0)
+    false => types.to_int(s) !? {
+        success(v) => v
+        failure(e) => 0
+    };
+
+// parse_radix converts a run of digits in the given base to an integer.
+func parse_radix(s, base, i, acc) = match i >= string.length(s)
+    true => acc
+    false => parse_radix(s, base, i + 1, acc * base + digit_value(s, i));
+
+func digit_value(s, i) = digit_of(string.char_at(s, i));
+
+func digit_of(ch) = match ch
+    Maybe.Some("0") => 0
+    Maybe.Some("1") => 1
+    Maybe.Some("2") => 2
+    Maybe.Some("3") => 3
+    Maybe.Some("4") => 4
+    Maybe.Some("5") => 5
+    Maybe.Some("6") => 6
+    Maybe.Some("7") => 7
+    Maybe.Some("8") => 8
+    Maybe.Some("9") => 9
+    Maybe.Some("a") => 10
+    Maybe.Some("b") => 11
+    Maybe.Some("c") => 12
+    Maybe.Some("d") => 13
+    Maybe.Some("e") => 14
+    Maybe.Some("f") => 15
+    Maybe.Some("A") => 10
+    Maybe.Some("B") => 11
+    Maybe.Some("C") => 12
+    Maybe.Some("D") => 13
+    Maybe.Some("E") => 14
+    Maybe.Some("F") => 15
+    _ => 0;
+
+func compile_const(st, c) = do
+    added = add_constant(st, c);
+    {e: ast.EWild, st: emit(added.st, bytecode.ins_u16(bytecode.constant(), added.index))}
+end;
+
+func compile_bool(st, value) = match value
+    true => {e: ast.EWild, st: emit(st, bytecode.ins(bytecode.true_()))}
+    false => {e: ast.EWild, st: emit(st, bytecode.ins(bytecode.false_()))};
+
+func compile_ident(st, name) = match find_global(st.globals, name, 0, len(st.globals))
+    Maybe.Some(index) => {e: ast.EWild, st: emit(st, bytecode.ins_u16(bytecode.get_global(), index))}
+    Maybe.None => {e: ast.EWild, st: st};
+
+func compile_member(st, object, property) = do
+    obj = compile_expr(st, object);
+    added = add_constant(obj.st, serialize.CStr(property));
+    {e: ast.EWild, st: emit(added.st, bytecode.ins_u16(bytecode.get_member(), added.index))}
+end;
+
+func compile_call(st, fn, args) = do
+    f = compile_expr(st, fn);
+    a = compile_args(f.st, args, 0, len(args));
+    {e: ast.EWild, st: emit(a, bytecode.ins_u8(bytecode.call(), len(args)))}
+end;
+
+func compile_args(st, args, i, n) = match i >= n
+    true => st
+    false => compile_args(compile_expr(st, args[i]).st, args, i + 1, n);
+
+// `x |> f` evaluates the *function* first and the piped value second: the VM
+// looks for the callee at sp-1-numArgs, so the callee has to be pushed first.
+func compile_pipe(st, left, right) = do
+    r = compile_expr(st, right);
+    l = compile_expr(r.st, left);
+    {e: ast.EWild, st: emit(l.st, bytecode.ins_u8(bytecode.call(), 1))}
+end;
+
+func compile_effect_pipe(st, left, right) = compile_pipe(st, left, right);
+
+// Binary arithmetic on two operands. The operand order is left then right, which
+// is what the VM pops.
+func compile_infix(st, op, left, right) = do
+    l = compile_expr(st, left);
+    r = compile_expr(l.st, right);
+    {e: ast.EWild, st: emit(r.st, bytecode.ins(binary_opcode(op)))}
+end;
+
+func binary_opcode(op) = match op
+    "+" => bytecode.add()
+    "-" => bytecode.sub()
+    "*" => bytecode.mul()
+    "/" => bytecode.div()
+    "%" => bytecode.mod()
+    "**" => bytecode.pow()
+    "==" => bytecode.equal()
+    "!=" => bytecode.not_equal()
+    "<" => bytecode.less()
+    ">" => bytecode.greater()
+    "<=" => bytecode.less_equal()
+    ">=" => bytecode.greater_equal()
+    "&" => bytecode.bit_and()
+    "|" => bytecode.bit_or()
+    "^" => bytecode.bit_xor()
+    "<<" => bytecode.shl()
+    ">>" => bytecode.shr()
+    _ => bytecode.dup();
+
+// ---------------------------------------------------------------------------
+// Output
+// ---------------------------------------------------------------------------
+
+func to_bone(st) = serialize.encode_program(st.consts, st.code);
