@@ -1,0 +1,207 @@
+// bytecode - instruction encoding for the .bone format.
+//
+// Opcode numbers are part of the file format: they are written into .bone files
+// and are append-only (specs/bone-format.md §1, §5.1). Names here mirror the
+// reference implementation's Op… constants, lower-cased and cased with a
+// trailing underscore where the name is a Calcium keyword.
+//
+// Operands are big-endian: u16 for indices and jumps, u8 for counts and flags.
+
+namespace bytecode;
+
+use core.array;
+
+// CONSTANT is opcode 0.
+func constant() = 0;
+// POP is opcode 1.
+func pop() = 1;
+// DUP is opcode 2.
+func dup() = 2;
+// GET_LOCAL is opcode 3.
+func get_local() = 3;
+// SET_LOCAL is opcode 4.
+func set_local() = 4;
+// GET_GLOBAL is opcode 5.
+func get_global() = 5;
+// SET_GLOBAL is opcode 6.
+func set_global() = 6;
+// ADD is opcode 7.
+func add() = 7;
+// SUB is opcode 8.
+func sub() = 8;
+// MUL is opcode 9.
+func mul() = 9;
+// DIV is opcode 10.
+func div() = 10;
+// MOD is opcode 11.
+func mod() = 11;
+// POW is opcode 12.
+func pow() = 12;
+// NEG is opcode 13.
+func neg() = 13;
+// EQUAL is opcode 14.
+func equal() = 14;
+// NOT_EQUAL is opcode 15.
+func not_equal() = 15;
+// LESS is opcode 16.
+func less() = 16;
+// GREATER is opcode 17.
+func greater() = 17;
+// LESS_EQUAL is opcode 18.
+func less_equal() = 18;
+// GREATER_EQUAL is opcode 19.
+func greater_equal() = 19;
+// NOT is opcode 20.
+func not() = 20;
+// AND is opcode 21.
+func and() = 21;
+// OR is opcode 22.
+func or() = 22;
+// JUMP is opcode 23.
+func jump() = 23;
+// JUMP_IF_FALSE is opcode 24.
+func jump_if_false() = 24;
+// JUMP_IF_TRUE is opcode 25.
+func jump_if_true() = 25;
+// CALL is opcode 26.
+func call() = 26;
+// RET is opcode 27.
+func ret() = 27;
+// CLOSURE is opcode 28.
+func closure() = 28;
+// GET_FREE is opcode 29.
+func get_free() = 29;
+// CALL_EFFECT is opcode 30.
+func call_effect() = 30;
+// ARRAY is opcode 31.
+func array() = 31;
+// ARRAY_CONCAT is opcode 32.
+func array_concat() = 32;
+// INDEX is opcode 33.
+func index() = 33;
+// SPREAD is opcode 34.
+func spread() = 34;
+// CALL_SPREAD is opcode 35.
+func call_spread() = 35;
+// TUPLE is opcode 36.
+func tuple() = 36;
+// HASH_LIT is opcode 37 ("hash" is a keyword).
+func hash_lit() = 37;
+// GET_MEMBER is opcode 38.
+func get_member() = 38;
+// WRAP_SUCCESS is opcode 39.
+func wrap_success() = 39;
+// WRAP_FAILURE is opcode 40.
+func wrap_failure() = 40;
+// UNWRAP_OR_JUMP is opcode 41.
+func unwrap_or_jump() = 41;
+// IS_SUCCESS is opcode 42.
+func is_success() = 42;
+// IS_FAILURE is opcode 43.
+func is_failure() = 43;
+// UNWRAP is opcode 44.
+func unwrap() = 44;
+// BUILTIN is opcode 45.
+func builtin() = 45;
+// CHECK_CONSTRAINT is opcode 46.
+func check_constraint() = 46;
+// LOAD_MODULE is opcode 47.
+func load_module() = 47;
+// NONE is opcode 48.
+func none() = 48;
+// TRUE_ is opcode 49.
+func true_() = 49;
+// FALSE_ is opcode 50.
+func false_() = 50;
+// STAY_BEGIN is opcode 51.
+func stay_begin() = 51;
+// STAY_END is opcode 52.
+func stay_end() = 52;
+// STAY_GET_STATE is opcode 53.
+func stay_get_state() = 53;
+// CONTINUE_ is opcode 54.
+func continue_() = 54;
+// LEAVE is opcode 55.
+func leave() = 55;
+// SPAWN is opcode 56.
+func spawn() = 56;
+// EXPECTS is opcode 57.
+func expects() = 57;
+// HANDLER_READY is opcode 58.
+func handler_ready() = 58;
+// HANDLER_RESET is opcode 59.
+func handler_reset() = 59;
+// HANDLER_PAUSE is opcode 60.
+func handler_pause() = 60;
+// HANDLER_RESUME is opcode 61.
+func handler_resume() = 61;
+// CANCEL is opcode 62.
+func cancel() = 62;
+// ALL is opcode 63.
+func all() = 63;
+// TIMEOUT is opcode 64.
+func timeout() = 64;
+// INTERVAL is opcode 65.
+func interval() = 65;
+// TAIL_CALL is opcode 66.
+func tail_call() = 66;
+// CONSTRUCT_ADT is opcode 67.
+func construct_adt() = 67;
+// MATCH_ADT is opcode 68.
+func match_adt() = 68;
+// CONSTRUCT_MAYBE_SOME is opcode 69.
+func construct_maybe_some() = 69;
+// ADD_OVERLOAD is opcode 70.
+func add_overload() = 70;
+// REGEX_MATCH is opcode 71.
+func regex_match() = 71;
+// SECRET_WRAP is opcode 72.
+func secret_wrap() = 72;
+// SECRET_MAP is opcode 73.
+func secret_map() = 73;
+// SECRET_CAPABILITY is opcode 74.
+func secret_capability() = 74;
+// SECRET_WITH_BEGIN is opcode 75.
+func secret_with_begin() = 75;
+// SECRET_WITH_END is opcode 76.
+func secret_with_end() = 76;
+// CHECK_SECRET_CAPABILITY is opcode 77.
+func check_secret_capability() = 77;
+// ALLOW_SECRET_CALL is opcode 78.
+func allow_secret_call() = 78;
+// BIT_AND is opcode 79.
+func bit_and() = 79;
+// BIT_OR is opcode 80.
+func bit_or() = 80;
+// BIT_XOR is opcode 81.
+func bit_xor() = 81;
+// BIT_NOT is opcode 82.
+func bit_not() = 82;
+// SHL is opcode 83.
+func shl() = 83;
+// SHR is opcode 84.
+func shr() = 84;
+// MATCH_FAIL is opcode 85.
+func match_fail() = 85;
+
+// ---------------------------------------------------------------------------
+// Instruction encoding
+// ---------------------------------------------------------------------------
+
+// ins builds an instruction with one byte operand.
+func ins(op) = [op];
+
+func ins_u8(op, a) = [op, a];
+
+// ins_u16 uses a big-endian 16-bit operand. Shifts and masks, not division:
+// `/` in Calcium is floating-point.
+func ins_u16(op, a) = [op, (a >> 8) & 255, a & 255];
+
+// ins_u16_u8 is `OpClosure` / `OpConstructADT` / `OpMatchADT`: a constant index
+// followed by a count.
+func ins_u16_u8(op, a, b) = [op, (a >> 8) & 255, a & 255, b];
+
+// width reports how many bytes an instruction with the given number of 16-bit
+// and 8-bit operands occupies, including the opcode.
+func width(n_u16, n_u8) = 1 + n_u16 * 2 + n_u8;
+

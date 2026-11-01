@@ -1,0 +1,123 @@
+// serialize - write a compiled program as .bone bytes.
+//
+// The format is normative in specs/bone-format.md: magic "CALB", a 1.1 version,
+// a big-endian constant pool, then the instruction stream. Every multi-byte
+// integer in the body is big-endian; only the standalone-executable trailer in
+// `calcium build` is little-endian, and that envelope is not built here.
+
+namespace serialize;
+
+use core.array;
+use core.bytes;
+
+// ---------------------------------------------------------------------------
+// Constants
+//
+// A constant pool entry is a tagged value. Only the kinds that have a tag in the
+// format can appear here; arrays, tuples and hashes are built at run time.
+// ---------------------------------------------------------------------------
+
+type Constant =
+    CBool(value) |
+    CInt(value) |
+    CFloat(value) |
+    CStr(value) |
+    CFunc(record);
+
+// FunctionRecord is one function constant: everything the format stores about a
+// function, including its own instruction stream.
+type FunctionRecord = FunctionRecord(name, module_id, params, num_locals, is_effect, body);
+
+_TAG_BOOL = 1;
+_TAG_INT = 2;
+_TAG_FLOAT = 3;
+_TAG_STRING = 4;
+_TAG_FUNCTION = 5;
+_TAG_REGEX = 6;
+_TAG_ADT = 7;
+
+// ---------------------------------------------------------------------------
+// Primitives
+// ---------------------------------------------------------------------------
+
+// `/` is floating-point division in Calcium, so the encoders extract bytes with
+// shifts and masks. That keeps every value an int, which the byte primitives
+// require.
+func u8(n) = [n & 255];
+
+func u16(n) = [(n >> 8) & 255, n & 255];
+
+func u32(n) = [(n >> 24) & 255, (n >> 16) & 255, (n >> 8) & 255, n & 255];
+
+// str_bytes writes a string as its byte length followed by the bytes.
+func str_bytes(s) = concat_bytes(u32(bytes.byte_len(s)), bytes.to_bytes(s));
+
+// concat_bytes appends b to a, returning a new byte array.
+func concat_bytes(a, b) = concat_into(copy_list(a, 0, len(a), []), b, 0, len(b));
+
+func copy_list(a, i, n, acc) = match i >= n
+    true => acc
+    false => copy_list(a, i + 1, n, push(acc, a[i]));
+
+func concat_into(acc, b, i, n) = match i >= n
+    true => acc
+    false => concat_into(push(acc, b[i]), b, i + 1, n);
+
+// ---------------------------------------------------------------------------
+// Constant encoding
+// ---------------------------------------------------------------------------
+
+func encode_constant(c) = match c
+    C.Bool(value) => concat_bytes(u8(_TAG_BOOL), u8(bool_byte(value)))
+    C.Int(value) => concat_bytes(u8(_TAG_INT), i64_bytes(value))
+    C.Str(value) => concat_bytes(u8(_TAG_STRING), str_bytes(value))
+    C.Func(record) => concat_bytes(u8(_TAG_FUNCTION), encode_function(record))
+    _ => [];
+
+func bool_byte(value) = match value
+    true => 1
+    false => 0;
+
+// i64_bytes is the eight big-endian two's-complement bytes of an integer.
+func i64_bytes(v) = bytes.from_int(v);
+
+func encode_function(r) = match r
+    FunctionRecord.FunctionRecord(name, module_id, params, num_locals, is_effect, body) =>
+        encode_function_fields(name, module_id, params, num_locals, is_effect, body)
+    _ => [];
+
+func encode_function_fields(name, module_id, params, num_locals, is_effect, body) = concat_bytes(
+    concat_bytes(str_bytes(name), str_bytes(module_id)),
+    concat_bytes(
+        concat_bytes(u32(len(params)), encode_params(params, 0, len(params), [])),
+        concat_bytes(
+            concat_bytes(u32(num_locals), u8(bool_byte(is_effect))),
+            concat_bytes(u32(len(body)), body))));
+
+func encode_params(params, i, n, acc) = match i >= n
+    true => acc
+    false => encode_params(params, i + 1, n, concat_bytes(acc, str_bytes(params[i])));
+
+// ---------------------------------------------------------------------------
+// Program
+// ---------------------------------------------------------------------------
+
+func encode_program(constants, instructions) = concat_bytes(
+    magic(),
+    concat_bytes(
+        u8(1),
+        concat_bytes(
+            u8(1),
+            concat_bytes(
+                concat_bytes(u32(len(constants)), encode_constants(constants, 0, len(constants), [])),
+                concat_bytes(u32(len(instructions)), instructions)))));
+
+func magic() = [67, 65, 76, 66];
+
+func encode_constants(cs, i, n, acc) = match i >= n
+    true => acc
+    false => encode_constants(cs, i + 1, n, concat_bytes(acc, encode_constant(cs[i])));
+
+// to_string_bytes turns the encoded bytes back into a string, which is what
+// gets written to disk.
+func to_string_bytes(bs) = bytes.from_bytes(bs);
