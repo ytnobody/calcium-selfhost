@@ -39,9 +39,23 @@ use serialize;
 //   free          [{name, index}] captured from the enclosing function
 //   outer_locals  the enclosing function's locals, used to detect captures
 //   outer_free    the enclosing function's own captures (passed through)
+//   errors        compile-time diagnostics: [{line, col, message}]
 func new_state() = {
     code: [], consts: [], globals: [], nglobals: 0,
-    locals: [], nlocals: 0, free: [], outer_locals: [], outer_free: [], in_fn: false
+    locals: [], nlocals: 0, free: [], outer_locals: [], outer_free: [], in_fn: false,
+    errors: []
+};
+
+// add_error records a diagnostic. Compilation continues so that one run reports as
+// many problems as possible, exactly like a compiler that collects errors.
+func add_error(st, line, col, message) =
+    with_errors_list(st, push(st.errors, {line: line, col: col, message: message}));
+
+func with_errors_list(st, errors) = {
+    code: st.code, consts: st.consts, globals: st.globals, nglobals: st.nglobals,
+    locals: st.locals, nlocals: st.nlocals, free: st.free,
+    outer_locals: st.outer_locals, outer_free: st.outer_free, in_fn: st.in_fn,
+    errors: errors
 };
 
 // with_fresh_locals starts a new function body: parameters become locals 0..n-1.
@@ -67,7 +81,8 @@ func with_free(st, free) = rebuild(st, st.code, st.consts, st.globals, st.ngloba
 func rebuild(st, code, consts, globals, nglobals, locals, nlocals, free, outer_locals, outer_free) = {
     code: code, consts: consts, globals: globals, nglobals: nglobals,
     locals: locals, nlocals: nlocals, free: free,
-    outer_locals: outer_locals, outer_free: outer_free, in_fn: st.in_fn
+    outer_locals: outer_locals, outer_free: outer_free, in_fn: st.in_fn,
+    errors: st.errors
 };
 
 func params_locals(params, i, n, acc) = match i >= n

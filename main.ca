@@ -130,7 +130,23 @@ func compile_file(argv) = do
     src = read_source(input)
     parsed = parser.parse_program(lexer.tokenize(src))
     st = compiler.compile_program(parsed.statements)
-    io.write_file(output, serialize.to_string_bytes(compiler.to_bone(st)))
+    match len(st.errors) == 0
+        true => io.write_file(output, serialize.to_string_bytes(compiler.to_bone(st)))
+        false => report_compile_errors(input, st.errors, 0, len(st.errors))
+end;
+
+// report_compile_errors prints `<file>:<line>:<col>: <message>` per diagnostic and
+// exits non-zero, so a compile that found problems cannot look successful.
+func report_compile_errors(path, errors, i, n) = do
+    report_one_error(path, errors[i]);
+    more = i + 1 < n;
+    match more
+        true => report_compile_errors(path, errors, i + 1, n)
+        false => os.exit(1)
+end;
+
+func report_one_error(path, e) = do
+    concat(path, ":", to_string(e.line), ":", to_string(e.col), ": ", e.message) !> io.say
 end;
 
 // run_file compiles the input with the self-hosted compiler and executes the
@@ -140,7 +156,9 @@ func! run_file(path) = do
     src = read_source(path)
     parsed = parser.parse_program(lexer.tokenize(src))
     st = compiler.compile_program(parsed.statements)
-    vm.run(st.consts, st.code)
+    match len(st.errors) == 0
+        true => vm.run(st.consts, st.code)
+        false => report_compile_errors(path, st.errors, 0, len(st.errors))
 end;
 
 // check_file prints one finding per line as `<line>:<column>\ttype`, matching
