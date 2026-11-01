@@ -17,6 +17,7 @@ use core.string;
 use core.types;
 use core.io!;
 use core.math;
+use core.regex;
 use core.array;
 use bytecode;
 use serialize;
@@ -119,8 +120,15 @@ func constant_value(c) = match c
     Constant.CStr(v) => v
     Constant.CAdt(name, tag, items) => AdtVal(name, tag, map_constants(items, 0, len(items), []))
     Constant.CFunc(record) => Closure(record, [])
-    Constant.CRegex(pattern, flags) => pattern
+    Constant.CRegex(pattern, flags) => compile_regex(pattern, flags)
     _ => 0;
+
+// A regex constant becomes a native Regex value through core.regex; the raw
+// pattern is kept as a fallback so a bad pattern cannot abort loading.
+func compile_regex(pattern, flags) = regex.compile(pattern, flags) !? {
+    success(v) => v
+    failure(e) => pattern
+};
 
 func map_constants(items, i, n, acc) = match i >= n
     true => acc
@@ -180,6 +188,7 @@ func module_member(path, name) = match path
     "core.array" => HostFn(concat("core.array:", name))
     "core.math" => HostFn(concat("core.math:", name))
     "core.types" => HostFn(concat("core.types:", name))
+    "core.regex" => HostFn(concat("core.regex:", name))
     _ => HostFn("unsupported-module:");
 
 func io_member(name) = match name
@@ -327,6 +336,7 @@ func dispatch(st, op, ip) = match op
     bytecode.tuple() => op_tuple(st, ip, read_u16(cl_body(frame_cl(current(st))), ip))
     bytecode.hash_lit() => op_hash(st, ip, read_u16(cl_body(frame_cl(current(st))), ip))
     bytecode.index() => op_index(st, ip)
+    bytecode.regex_match() => op_regex_match(st, ip)
     bytecode.get_member() => op_get_member(st, ip)
     bytecode.load_module() => op_load_module(st, ip)
     bytecode.builtin() => op_builtin(st, ip, read_u8(cl_body(frame_cl(current(st))), ip))
@@ -658,6 +668,17 @@ func index_container(obj, idx) = match types.is_array(obj)
     false => match types.is_hash(obj)
         true => get(obj, idx, 0)
         false => obj;
+
+// `left ~ right`: the string matches the regex.
+func op_regex_match(st, ip) = do
+    r = pop_value(st);
+    l = pop_value(r.st);
+    done(advance(push_value(l.st, regex_matches(l.v, r.v)), ip))
+end;
+
+func regex_matches(s, rx) = match types.is_string(s)
+    true => regex.matches(s, rx)
+    false => false;
 
 func op_get_member(st, ip) = do
     name = member_name(st, read_u16(cl_body(frame_cl(current(st))), ip));
@@ -1058,6 +1079,18 @@ func! host_apply(name, args) = match name
     "core.types:is_function" => host_ok(call_n(types.is_function, args))
     "core.types:is_number" => host_ok(call_n(types.is_number, args))
     "core.types:is_success" => host_ok(call_n(types.is_success, args))
+    "core.regex:matches" => host_ok(call_n(regex.matches, args))
+    "core.regex:find" => host_ok(call_n(regex.find, args))
+    "core.regex:find_all" => host_ok(call_n(regex.find_all, args))
+    "core.regex:replace" => host_ok(call_n(regex.replace, args))
+    "core.regex:replace_first" => host_ok(call_n(regex.replace_first, args))
+    "core.regex:split" => host_ok(call_n(regex.split, args))
+    "core.regex:capture" => host_ok(call_n(regex.capture, args))
+    "core.regex:compile" => host_ok(call_n(regex.compile, args))
+    "core.regex:test" => host_ok(call_n(regex.test, args))
+    "core.regex:is_match" => host_ok(call_n(regex.is_match, args))
+    "core.regex:extract" => host_ok(call_n(regex.extract, args))
+    "core.regex:escape" => host_ok(call_n(regex.escape, args))
     "core.types:is_failure" => host_ok(call_n(types.is_failure, args))
     _ => host_err(concat("unsupported host function: ", name));
 
