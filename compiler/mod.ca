@@ -33,27 +33,45 @@ use serialize;
 //   nglobals  next free global index
 //   locals    [{name, index}] for the function being compiled
 //   nlocals   next free local index
-func new_state() = {code: [], consts: [], globals: [], nglobals: 0, locals: [], nlocals: 0};
+//   free          [{name, index}] captured from the enclosing function
+//   outer_locals  the enclosing function's locals, used to detect captures
+//   outer_free    the enclosing function's own captures (passed through)
+func new_state() = {
+    code: [], consts: [], globals: [], nglobals: 0,
+    locals: [], nlocals: 0, free: [], outer_locals: [], outer_free: [], in_fn: false
+};
 
 // with_fresh_locals starts a new function body: parameters become locals 0..n-1.
 func with_fresh_locals(st, params) = {
     code: st.code, consts: st.consts, globals: st.globals, nglobals: st.nglobals,
-    locals: params_locals(params, 0, len(params), []), nlocals: len(params)
+    locals: params_locals(params, 0, len(params), []), nlocals: len(params),
+    free: [], outer_locals: st.locals, outer_free: st.free, in_fn: true
+};
+
+// with_lambda starts a closure's own instruction stream. Constants stay shared
+// with the enclosing program, which is what the format requires.
+func with_lambda(st, params) = {
+    code: [], consts: st.consts, globals: st.globals, nglobals: st.nglobals,
+    locals: params_locals(params, 0, len(params), []), nlocals: len(params),
+    free: [], outer_locals: st.locals, outer_free: st.free, in_fn: true
+};
+
+func with_free(st, free) = rebuild(st, st.code, st.consts, st.globals, st.nglobals,
+    st.locals, st.nlocals, free, st.outer_locals, st.outer_free);
+
+func rebuild(st, code, consts, globals, nglobals, locals, nlocals, free, outer_locals, outer_free) = {
+    code: code, consts: consts, globals: globals, nglobals: nglobals,
+    locals: locals, nlocals: nlocals, free: free,
+    outer_locals: outer_locals, outer_free: outer_free, in_fn: st.in_fn
 };
 
 func params_locals(params, i, n, acc) = match i >= n
     true => acc
     false => params_locals(params, i + 1, n, push(acc, {name: params[i], index: i}));
 
-func without_locals(st) = {
-    code: st.code, consts: st.consts, globals: st.globals, nglobals: st.nglobals,
-    locals: [], nlocals: 0
-};
-
-func define_local(st, name) = {
-    code: st.code, consts: st.consts, globals: st.globals, nglobals: st.nglobals,
-    locals: push(st.locals, {name: name, index: st.nlocals}), nlocals: st.nlocals + 1
-};
+func define_local(st, name) = rebuild(st, st.code, st.consts, st.globals, st.nglobals,
+    push(st.locals, {name: name, index: st.nlocals}), st.nlocals + 1,
+    st.free, st.outer_locals, st.outer_free);
 
 // ---------------------------------------------------------------------------
 // Emitting
@@ -61,14 +79,14 @@ func define_local(st, name) = {
 
 func emit(st, bytes) = with_code(st, concat_arr(st.code, bytes));
 
-func with_code(st, code) = {code: code, consts: st.consts, globals: st.globals,
-    nglobals: st.nglobals, locals: st.locals, nlocals: st.nlocals};
+func with_code(st, code) = rebuild(st, code, st.consts, st.globals, st.nglobals,
+    st.locals, st.nlocals, st.free, st.outer_locals, st.outer_free);
 
-func with_consts(st, consts) = {code: st.code, consts: consts, globals: st.globals,
-    nglobals: st.nglobals, locals: st.locals, nlocals: st.nlocals};
+func with_consts(st, consts) = rebuild(st, st.code, consts, st.globals, st.nglobals,
+    st.locals, st.nlocals, st.free, st.outer_locals, st.outer_free);
 
-func with_globals(st, globals, nglobals) = {code: st.code, consts: st.consts,
-    globals: globals, nglobals: nglobals, locals: st.locals, nlocals: st.nlocals};
+func with_globals(st, globals, nglobals) = rebuild(st, st.code, st.consts,
+    globals, nglobals, st.locals, st.nlocals, st.free, st.outer_locals, st.outer_free);
 
 // add_constant appends a constant and returns its index and the new state.
 func add_constant(st, c) = {index: len(st.consts), st: with_consts(st, push(st.consts, c))};
@@ -116,6 +134,8 @@ func compile_statement(st, stmt) = match stmt
     Stmt.SUse(path, effect) => compile_use(st, path)
     Stmt.SExpr(e) => compile_expr_statement(st, e)
     Stmt.SFunc(name, params, constraints, body, is_effect) => compile_function(st, name, params, is_effect, body)
+    Stmt.SAssign(name, value) => compile_assign(st, name, value)
+    Stmt.SType(name, variants) => compile_variants(st, name, variants, 0, len(variants))
     _ => st;
 
 // A function declaration compiles its body into a FunctionRecord constant and
@@ -123,16 +143,96 @@ func compile_statement(st, stmt) = match stmt
 func compile_function(st, name, params, is_effect, body) = do
     inner = with_fresh_locals(st, params);
     compiled = compile_body(inner, body);
-    listed = add_constant(st, serialize.CFunc(serialize.FunctionRecord(
-        name, "entry", params, compiled.st.nlocals, is_effect, compiled.st.code)));
-    st2 = emit(listed.st, bytecode.ins_u16_u8(bytecode.closure(), listed.index, 0));
+    record = serialize.FunctionRecord(name, "entry", params, compiled.st.nlocals, is_effect, compiled.st.code);
+    listed = add_constant(with_consts(st, compiled.st.consts), serialize.CFunc(record));
+    loaded = load_captures(listed.st, compiled.st.free, 0, len(compiled.st.free));
+    st2 = emit(loaded, bytecode.ins_u16_u8(bytecode.closure(), listed.index, len(compiled.st.free)));
     defined = define_global(st2, name);
     emit(defined.st, bytecode.ins_u16(bytecode.set_global(), defined.index))
 end;
 
+// A lambda becomes a function constant plus OpClosure. Values it captures are
+// pushed by the enclosing function first, in capture order.
+func compile_lambda(st, params, body) = do
+    inner = with_lambda(st, params);
+    compiled = compile_body(inner, body);
+    record = serialize.FunctionRecord("", "entry", params, compiled.st.nlocals, false, compiled.st.code);
+    listed = add_constant(with_consts(st, compiled.st.consts), serialize.CFunc(record));
+    loaded = load_captures(listed.st, compiled.st.free, 0, len(compiled.st.free));
+    {e: ast.EWild, st: emit(loaded, bytecode.ins_u16_u8(bytecode.closure(), listed.index, len(compiled.st.free)))}
+end;
+
+func load_captures(st, frees, i, n) = match i >= n
+    true => st
+    false => load_captures(load_capture(st, frees[i].name), frees, i + 1, n);
+
+func load_capture(st, name) = match find_local(st.locals, name, 0, len(st.locals))
+    Maybe.Some(index) => emit(st, bytecode.ins_u8(bytecode.get_local(), index))
+    Maybe.None => load_capture_outer(st, name);
+
+func load_capture_outer(st, name) = match find_local(st.free, name, 0, len(st.free))
+    Maybe.Some(index) => emit(st, bytecode.ins_u8(bytecode.get_free(), index))
+    Maybe.None => emit_global_load(st, name);
+
+func emit_global_load(st, name) = match find_global(st.globals, name, 0, len(st.globals))
+    Maybe.Some(index) => emit(st, bytecode.ins_u16(bytecode.get_global(), index))
+    Maybe.None => st;
+
 func compile_body(st, body) = do
     r = compile_expr(st, body);
     {e: ast.EWild, st: emit(r.st, bytecode.ins(bytecode.ret()))}
+end;
+
+// A top-level assignment binds a global; inside a function it binds a local, as
+// the reference does. Variables are immutable, so a name is bound once.
+func compile_assign(st, name, value) = do
+    r = compile_expr(st, value);
+    match r.st.in_fn
+        true => define_local_assign(r.st, name)
+        false => define_global_assign(r.st, name)
+end;
+
+func define_local_assign(st, name) = do
+    st2 = define_local(st, name);
+    index = st2.nlocals - 1;
+    emit(st2, bytecode.ins_u8(bytecode.set_local(), index))
+end;
+
+func define_global_assign(st, name) = do
+    defined = define_global(st, name);
+    emit(defined.st, bytecode.ins_u16(bytecode.set_global(), defined.index))
+end;
+
+// A `type` declaration binds one constructor per variant: a constant for a
+// zero-argument variant, a function otherwise.
+func compile_variants(st, type_name, variants, i, n) = match i >= n
+    true => st
+    false => compile_variants(compile_variant(st, type_name, variants[i]), type_name, variants, i + 1, n);
+
+func compile_variant(st, type_name, v) = match v
+    Variant.Variant(name, fields) => compile_variant_of(st, type_name, name, fields)
+    _ => st;
+
+func compile_variant_of(st, type_name, name, fields) = match len(fields) == 0
+    true => compile_nullary_ctor(st, type_name, name)
+    false => compile_ctor_fn(st, type_name, name, fields);
+
+func compile_nullary_ctor(st, type_name, name) = do
+    added = add_constant(st, serialize.CAdt(type_name, name, []));
+    s1 = emit(added.st, bytecode.ins_u16(bytecode.constant(), added.index));
+    defined = define_global(s1, name);
+    emit(defined.st, bytecode.ins_u16(bytecode.set_global(), defined.index))
+end;
+
+func compile_ctor_fn(st, type_name, name, fields) = do
+    tag_added = add_constant(st, serialize.CStr(concat(type_name, ".", name)));
+    body = concat_arr(bytecode.ins_u16_u8(bytecode.construct_adt(), tag_added.index, len(fields)),
+        bytecode.ins(bytecode.ret()));
+    record = serialize.FunctionRecord(name, "entry", fields, len(fields), false, body);
+    listed = add_constant(tag_added.st, serialize.CFunc(record));
+    s1 = emit(listed.st, bytecode.ins_u16_u8(bytecode.closure(), listed.index, 0));
+    defined = define_global(s1, name);
+    emit(defined.st, bytecode.ins_u16(bytecode.set_global(), defined.index))
 end;
 
 func compile_use(st, path) = do
@@ -149,6 +249,10 @@ func module_name(path) = module_name_from(string.split(path, "."), 0, len(string
 func module_name_from(parts, i, n, acc) = match i >= n
     true => acc
     false => module_name_from(parts, i + 1, n, parts[i]);
+
+// compile_expr_strict compiles an expression and keeps only the state; the
+// node field of the result record is not used by the caller.
+func compile_expr_strict(st, e) = compile_expr(st, e).st;
 
 func compile_expr_statement(st, e) = do
     r = compile_expr(st, e);
@@ -169,6 +273,15 @@ func compile_expr(st, e) = match e
     Expr.EPipe(left, right) => compile_pipe(st, left, right)
     Expr.EInfix(op, left, right) => compile_infix(st, op, left, right)
     Expr.EArray(elements, is_concat) => compile_array(st, elements, is_concat)
+    Expr.ETuple(elements) => compile_tuple(st, elements)
+    Expr.EIndex(left, index) => compile_index(st, left, index)
+    Expr.EPrefix(op, right) => compile_prefix(st, op, right)
+    Expr.ESuccess(value) => compile_success(st, value)
+    Expr.EFailure(value) => compile_failure(st, value)
+    Expr.EReturn(value) => compile_return(st, value)
+    Expr.EHash(pairs) => compile_hash(st, pairs)
+    Expr.ELambda(params, body) => compile_lambda(st, params, body)
+    Expr.EMatch(subject, cases) => compile_match(st, subject, cases)
     Expr.ECall(fn, args) => compile_call_or_builtin(st, fn, args)
     _ => {e: ast.EWild, st: st};
 
@@ -241,7 +354,20 @@ func compile_bool(st, value) = match value
 
 func compile_ident(st, name) = match find_local(st.locals, name, 0, len(st.locals))
     Maybe.Some(index) => {e: ast.EWild, st: emit(st, bytecode.ins_u8(bytecode.get_local(), index))}
+    Maybe.None => compile_captured(st, name);
+
+// A name that is not local but exists in the enclosing function is a capture:
+// it becomes a free variable of this closure.
+func compile_captured(st, name) = match find_local(st.outer_locals, name, 0, len(st.outer_locals))
+    Maybe.Some(_) => do
+        f = capture(st, name);
+        {e: ast.EWild, st: emit(f.st, bytecode.ins_u8(bytecode.get_free(), f.index))}
+    end
     Maybe.None => compile_global(st, name);
+
+func capture(st, name) = match find_local(st.free, name, 0, len(st.free))
+    Maybe.Some(index) => {index: index, st: st}
+    Maybe.None => {index: len(st.free), st: with_free(st, push(st.free, {name: name, index: len(st.free)}))};
 
 func compile_global(st, name) = match find_global(st.globals, name, 0, len(st.globals))
     Maybe.Some(index) => {e: ast.EWild, st: emit(st, bytecode.ins_u16(bytecode.get_global(), index))}
@@ -262,7 +388,7 @@ func compile_member(st, object, property) = do
 end;
 
 func compile_call(st, fn, args) = do
-    f = compile_expr(st, fn);
+    f = compile_callee(st, fn);
     a = compile_args(f.st, args, 0, len(args));
     {e: ast.EWild, st: emit(a, bytecode.ins_u8(bytecode.call(), len(args)))}
 end;
@@ -271,15 +397,31 @@ func compile_args(st, args, i, n) = match i >= n
     true => st
     false => compile_args(compile_expr(st, args[i]).st, args, i + 1, n);
 
-// `x |> f` evaluates the *function* first and the piped value second: the VM
-// looks for the callee at sp-1-numArgs, so the callee has to be pushed first.
-func compile_pipe(st, left, right) = do
-    r = compile_expr(st, right);
-    l = compile_expr(r.st, left);
-    {e: ast.EWild, st: emit(l.st, bytecode.ins_u8(bytecode.call(), 1))}
+// `x |> f(y)` is `f(x, y)`: the piped value becomes the *first* argument. For a
+// bare `x |> f` it is `f(x)`. The callee is pushed first because the VM looks
+// for it at sp-1-numArgs.
+func compile_pipe(st, left, right) = match right
+    Expr.ECall(fn, args) => compile_pipe_call(st, left, fn, args)
+    _ => do
+        r = compile_callee(st, right);
+        l = compile_expr(r.st, left);
+        {e: ast.EWild, st: emit(l.st, bytecode.ins_u8(bytecode.call(), 1))}
+    end;
+
+func compile_pipe_call(st, left, fn, args) = do
+    f = compile_callee(st, fn);
+    l = compile_expr(f.st, left);
+    a = compile_args(l.st, args, 0, len(args));
+    {e: ast.EWild, st: emit(a, bytecode.ins_u8(bytecode.call(), 1 + len(args)))}
 end;
 
 func compile_effect_pipe(st, left, right) = compile_pipe(st, left, right);
+
+// compile_callee pushes a callable: a builtin by index, or an ordinary
+// expression (a global, a local, a capture, or a member).
+func compile_callee(st, fn) = match builtin_index(fn)
+    Maybe.Some(index) => {e: ast.EWild, st: emit(st, bytecode.ins_u8(bytecode.builtin(), index))}
+    Maybe.None => compile_expr(st, fn);
 
 // An array literal pushes its elements then OpArray with the count.
 func compile_array(st, elements, is_concat) = do
@@ -290,17 +432,63 @@ func compile_array(st, elements, is_concat) = do
     {e: ast.EWild, st: emit(s1, bytecode.ins_u16(op, len(elements)))}
 end;
 
+func compile_index(st, left, index) = do
+    s1 = compile_expr_strict(st, left);
+    s2 = compile_expr_strict(s1, index);
+    {e: ast.EWild, st: emit(s2, bytecode.ins(bytecode.index()))}
+end;
+
+func compile_prefix(st, op, right) = do
+    s1 = compile_expr_strict(st, right);
+    {e: ast.EWild, st: emit(s1, bytecode.ins(prefix_opcode(op)))}
+end;
+
+func prefix_opcode(op) = match op
+    "-" => bytecode.neg()
+    "!" => bytecode.not()
+    "^" => bytecode.bit_not()
+    _ => bytecode.dup();
+
+func compile_success(st, value) = do
+    s1 = compile_expr_strict(st, value);
+    {e: ast.EWild, st: emit(s1, bytecode.ins(bytecode.wrap_success()))}
+end;
+
+func compile_failure(st, value) = do
+    s1 = compile_expr_strict(st, value);
+    {e: ast.EWild, st: emit(s1, bytecode.ins(bytecode.wrap_failure()))}
+end;
+
+func compile_return(st, value) = do
+    s1 = compile_expr_strict(st, value);
+    {e: ast.EWild, st: emit(s1, bytecode.ins(bytecode.ret()))}
+end;
+
+func compile_tuple(st, elements) = do
+    s1 = compile_args(st, elements, 0, len(elements));
+    {e: ast.EWild, st: emit(s1, bytecode.ins_u16(bytecode.tuple(), len(elements)))}
+end;
+
+// Each hash pair pushes its key then its value; OpHash pops the pairs.
+func compile_hash(st, pairs) = do
+    s1 = compile_pairs(st, pairs, 0, len(pairs));
+    {e: ast.EWild, st: emit(s1, bytecode.ins_u16(bytecode.hash_lit(), len(pairs)))}
+end;
+
+func compile_pairs(st, pairs, i, n) = match i >= n
+    true => st
+    false => compile_pairs(compile_pair(st, pairs[i]), pairs, i + 1, n);
+
+func compile_pair(st, pair) = match pair
+    HashPair.HashPair(key, value) => do
+        s1 = compile_expr_strict(st, key);
+        compile_expr_strict(s1, value)
+    end
+    _ => st;
+
 // A call to a builtin compiles to OpBuiltin with the builtin's index; anything
 // else is an ordinary call. The index order must match the VM's builtin list.
-func compile_call_or_builtin(st, fn, args) = match builtin_index(fn)
-    Maybe.Some(index) => do
-        // OpBuiltin pushes the builtin as a callable; the arguments and the call
-        // follow exactly as for an ordinary function.
-        s1 = emit(st, bytecode.ins_u8(bytecode.builtin(), index));
-        s2 = compile_args(s1, args, 0, len(args));
-        {e: ast.EWild, st: emit(s2, bytecode.ins_u8(bytecode.call(), len(args)))}
-    end
-    Maybe.None => compile_call(st, fn, args);
+func compile_call_or_builtin(st, fn, args) = compile_call(st, fn, args);
 
 // builtin_index mirrors the order of the compiler's builtin list, which is also
 // the order the VM registers them in.
@@ -354,6 +542,206 @@ func binary_opcode(op) = match op
     "<<" => bytecode.shl()
     ">>" => bytecode.shr()
     _ => bytecode.dup();
+
+// ---------------------------------------------------------------------------
+// Match
+//
+// The arm layout mirrors the reference compiler: every arm is conditional, the
+// no-match handler sits *before* the final arm (after it, its instruction would
+// break tail-call detection), and a trailing `_` arm emits no handler at all.
+// ---------------------------------------------------------------------------
+
+func compile_match(st, subject, cases) = do
+    s1 = compile_expr_strict(st, subject);
+    r = compile_arms(s1, cases, 0, len(cases), [], []);
+    {e: ast.EWild, st: patch_all(r.st, r.end_jumps)}
+end;
+
+func compile_arms(st, cases, i, n, end_jumps, acc) = match i >= n
+    true => {st: st, end_jumps: end_jumps}
+    false => compile_arm(st, cases, i, n, end_jumps, acc);
+
+func compile_arm(st, cases, i, n, end_jumps, acc) = do
+    c = cases[i];
+    last = i == n - 1;
+    fail = begin_fail(st, c, last);
+    rejections = compile_pattern_check(fail.st, c);
+    popped = emit(rejections.st, bytecode.ins(bytecode.pop()));
+    body = compile_expr(popped, case_body(c));
+    jumped = end_arm(body.st, last, end_jumps);
+    patch_target = match last
+        true => fail.pos
+        false => len(jumped.st.code);
+    compile_arms(patch_jumps(jumped.st, rejections.positions, patch_target), cases, i + 1, n, jumped.end_jumps, acc)
+end;
+
+// begin_fail emits the no-match handler for a final arm that can reject.
+// A Case is an ADT, so its fields are destructured rather than read.
+func case_pattern(c) = match c
+    Case.Case(pattern, guard, body, is_default) => pattern
+    _ => ast.EWild;
+
+func case_guard(c) = match c
+    Case.Case(pattern, guard, body, is_default) => guard
+    _ => ast.EWild;
+
+func case_body(c) = match c
+    Case.Case(pattern, guard, body, is_default) => body
+    _ => ast.EWild;
+
+func case_default(c) = match c
+    Case.Case(pattern, guard, body, is_default) => is_default
+    _ => false;
+
+func begin_fail(st, c, last) = match last && !case_default(c)
+    true => do
+        skip = emit(st, bytecode.ins_u16(bytecode.jump(), 0));
+        pos = len(skip.code);
+        with_fail(emit(skip, bytecode.ins(bytecode.match_fail())), pos)
+    end
+    false => with_fail(st, -1);
+
+func with_fail(st, pos) = {st: st, pos: pos};
+
+// end_arm records the jump that skips the remaining arms, except for the final
+// arm: a jump there would sit between the body and OpReturn and disable TCO.
+func end_arm(st, last, end_jumps) = match last
+    true => {st: st, end_jumps: end_jumps}
+    false => do
+        pos = len(st.code);
+        {st: emit(st, bytecode.ins_u16(bytecode.jump(), 0)), end_jumps: push(end_jumps, pos)}
+    end;
+
+// compile_pattern_check emits the test for one arm, leaving [subject] on the
+// stack, and returns the positions of the jumps taken when it does not match.
+func compile_pattern_check(st, c) = match case_default(c)
+    true => check_default(st)
+    false => check_pattern(st, c);
+
+func check_default(st) = do
+    s1 = emit(st, bytecode.ins(bytecode.dup()));
+    {st: emit(s1, bytecode.ins(bytecode.pop())), positions: []}
+end;
+
+func check_pattern(st, c) = match case_guard(c)
+    Expr.EWild => check_shape(st, case_pattern(c))
+    _ => check_guard(st, c);
+
+// A constructor pattern tests the tag and then binds or compares each payload.
+func check_shape(st, p) = match p
+    Expr.EConstructorPattern(type_name, name, fields) => check_ctor(st, type_name, name, fields)
+    _ => check_equal(st, p);
+
+func check_ctor(st, type_name, name, fields) = do
+    s1 = emit(st, bytecode.ins(bytecode.dup()));
+    added = add_constant(s1, serialize.CStr(tag_of(type_name, name)));
+    s2 = emit(added.st, bytecode.ins_u16_u8(bytecode.match_adt(), added.index, len(fields)));
+    s3 = emit(s2, bytecode.ins_u16(bytecode.jump_if_false(), 0));
+    bound = bind_fields(s3, fields, 0, len(fields), [len(s2.code)]);
+    {st: bound.st, positions: bound.positions}
+end;
+
+func tag_of(type_name, name) = match type_name == ""
+    true => name
+    false => concat(type_name, ".", name);
+
+// bind_fields extracts each payload position: a name binds it, `_` drops it, a
+// literal compares it.
+func bind_fields(st, fields, i, n, positions) = match i >= n
+    true => {st: st, positions: positions}
+    false => bind_field(st, fields, i, n, positions);
+
+func bind_field(st, fields, i, n, positions) = do
+    extracted = extract_field(st, i);
+    handled = apply_field(extracted, fields[i], positions);
+    bind_fields(handled.st, fields, i + 1, n, handled.positions)
+end;
+
+func extract_field(st, i) = do
+    s1 = emit(st, bytecode.ins(bytecode.dup()));
+    added = add_constant(s1, serialize.CInt(i));
+    s2 = emit(added.st, bytecode.ins_u16(bytecode.constant(), added.index));
+    emit(s2, bytecode.ins(bytecode.index()))
+end;
+
+func apply_field(st, field, positions) = match field
+    Expr.EWild => {st: emit(st, bytecode.ins(bytecode.pop())), positions: positions}
+    Expr.EIdent(name) => {st: bind_name(st, name), positions: positions}
+    _ => compare_field(st, field, positions);
+
+func compare_field(st, field, positions) = do
+    s1 = compile_expr_strict(st, field);
+    s2 = emit(s1, bytecode.ins(bytecode.equal()));
+    s3 = emit(s2, bytecode.ins_u16(bytecode.jump_if_false(), 0));
+    {st: s3, positions: push(positions, len(s2.code))}
+end;
+
+// A pattern with no guard is an expression compared against the subject.
+func check_equal(st, pattern) = do
+    s1 = emit(st, bytecode.ins(bytecode.dup()));
+    s2 = compile_expr_strict(s1, pattern);
+    s3 = emit(s2, bytecode.ins(bytecode.equal()));
+    {st: emit(s3, bytecode.ins_u16(bytecode.jump_if_false(), 0)), positions: [len(s3.code)]}
+end;
+
+// `x if cond` binds the subject to x, then tests the condition.
+func check_guard(st, c) = do
+    s1 = emit(st, bytecode.ins(bytecode.dup()));
+    bound = bind_name(s1, ident_name(case_pattern(c)));
+    s2 = compile_expr_strict(bound, case_guard(c));
+    s3 = emit(s2, bytecode.ins_u16(bytecode.jump_if_false(), 0));
+    {st: s3, positions: [len(s2.code)]}
+end;
+
+func ident_name(p) = match p
+    Expr.EIdent(name) => name
+    _ => "_";
+
+// bind_name stores the subject (already duplicated on the stack) into a local or
+// a global.
+func bind_name(st, name) = match st.in_fn
+    true => bind_local(st, name)
+    false => bind_global(st, name);
+
+func bind_local(st, name) = do
+    st2 = define_local(st, name);
+    emit(st2, bytecode.ins_u8(bytecode.set_local(), st2.nlocals - 1))
+end;
+
+func bind_global(st, name) = do
+    defined = define_global(st, name);
+    emit(defined.st, bytecode.ins_u16(bytecode.set_global(), defined.index))
+end;
+
+// ---------------------------------------------------------------------------
+// Jump patching
+// ---------------------------------------------------------------------------
+
+func patch_all(st, positions) = patch_all_loop(st, positions, 0, len(positions));
+
+func patch_all_loop(st, positions, i, n) = match i >= n
+    true => st
+    false => patch_all_loop(patch_jumps(st, [positions[i]], len(st.code)), positions, i + 1, n);
+
+func patch_jumps(st, positions, target) = patch_jumps_loop(st, positions, 0, len(positions), target);
+
+func patch_jumps_loop(st, positions, i, n, target) = match i >= n
+    true => st
+    false => patch_jumps_loop(patch_u16(st, positions[i], target), positions, i + 1, n, target);
+
+// patch_u16 rewrites the two operand bytes of the instruction whose opcode is at
+// `pos`.
+func patch_u16(st, pos, value) = with_code(st, replace_range(st.code, pos + 1, [(value >> 8) & 255, value & 255]));
+
+func replace_range(code, at, bs) = replace_loop(code, 0, len(code), at, bs, 0, len(bs), []);
+
+func replace_loop(code, i, n, at, bs, j, m, acc) = match i >= n
+    true => acc
+    false => replace_loop(code, i + 1, n, at, bs, j, m, push(acc, byte_in(code, i, at, bs)));
+
+func byte_in(code, i, at, bs) = match i >= at && i < at + len(bs)
+    true => bs[i - at]
+    false => code[i];
 
 // ---------------------------------------------------------------------------
 // Output
