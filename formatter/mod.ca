@@ -13,6 +13,9 @@
 
 namespace formatter;
 
+// implemented reports to the differential harness whether this component exists.
+func implemented() = true;
+
 use core.string;
 use core.array;
 use ast;
