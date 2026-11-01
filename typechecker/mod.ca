@@ -1,0 +1,266 @@
+// typechecker - optional gradual type checking.
+//
+// A program without annotations is never rejected. When an annotation is
+// present, the checker verifies that the annotated type is consistent with the
+// inferred type of the expression; the special type "Any" (the type of anything
+// that cannot be inferred) is compatible with every type, which is what makes
+// mixing typed and untyped code safe.
+//
+// Findings carry only a position: the message text is diagnostic and is not part
+// of the compatibility contract.
+//
+// Checks are performed for the same three places the reference checks:
+// annotated assignments, parameter annotations, and return annotations.
+
+namespace typechecker;
+
+// implemented reports to the differential harness whether this component exists.
+func implemented() = true;
+
+use core.string;
+use core.array;
+use ast;
+
+// A finding is {line, col}. Types are names: "Int", "Float", "String", "Bool",
+// "Array", "Hash", "Tuple", "Func", "Regex", "Success", "Failure", "Any".
+
+func any_type() = "Any";
+
+// State: the variable environment, declared return types, and findings.
+func empty_state() = {env: [], rets: [], errors: []};
+
+func check(statements) = run_statements(empty_state(), statements, 0, len(statements)).errors;
+
+func run_statements(st, ss, i, n) = match i >= n
+    true => st
+    false => run_statements(check_statement(st, ss[i]), ss, i + 1, n);
+
+func check_statement(st, stmt) = match stmt
+    Stmt.SAssign(name, value) => check_plain_assignment(st, name, value)
+    Stmt.SAssignAnnot(name, annot, value) => check_annotated_assignment(st, name, annot, value)
+    Stmt.SFunc(name, params, cons, types, ret, body, eff) => check_function(st, name, params, types, ret, body)
+    Stmt.SExpr(e) => merge(st, infer(st, e).errors)
+    _ => st;
+
+// ---------------------------------------------------------------------------
+// Assignments
+// ---------------------------------------------------------------------------
+
+func annotation_errors(errors, ok, annot) = match ok
+    true => errors
+    false => push(errors, {line: annot.line, col: annot.col});
+
+func check_plain_assignment(st, name, value) = do
+    r = infer(st, value);
+    with_errors(with_env(st, set_env(st.env, name, r.ty)), merge(st.errors, r.errors))
+end;
+
+// An annotated assignment records the declared type (not the inferred one) so
+// later uses are checked against the annotation.
+func check_annotated_assignment(st, name, annot, value) = do
+    ty = annotation_name(annot);
+    r = infer(st, value);
+    errors2 = annotation_errors(st.errors, type_compatible(ty, r.ty), annot);
+    with_errors(with_env(st, set_env(st.env, name, ty)), merge(errors2, r.errors))
+end;
+
+// ---------------------------------------------------------------------------
+// Functions
+// ---------------------------------------------------------------------------
+
+func check_function(st, name, params, types, ret, body) = do
+    child = bind_params(st.env, params, types, 0, len(params));
+    ret_ty = return_type_of(ret);
+    st2 = {env: child, rets: push(st.rets, {name: name, ty: ret_ty}), errors: st.errors};
+    r = infer(st2, body);
+    errors2 = return_errors(ret, ret_ty, r.ty, st.errors);
+    // The child environment is discarded: a function's parameters are not visible
+    // to its caller.
+    with_errors(st, merge(errors2, r.errors))
+end;
+
+func return_errors(ret, ret_ty, body_ty, errors) = match is_type_name(ret.name) && !type_compatible(ret_ty, body_ty)
+    true => push(errors, {line: ret.line, col: ret.col})
+    false => errors;
+
+func bind_params(env, params, types, i, n) = match i >= n
+    true => env
+    false => bind_params(bind_param(env, params[i], param_type(types, i)), params, types, i + 1, n);
+
+func bind_param(env, name, ty) = set_env(env, name, ty);
+
+func param_type(types, i) = match i < len(types)
+    true => param_type_of(types[i])
+    false => any_type();
+
+func param_type_of(rec) = match is_type_name(rec.name)
+    true => rec.name
+    false => any_type();
+
+func return_type_of(ret) = match is_type_name(ret.name)
+    true => ret.name
+    false => any_type();
+
+func is_type_name(name) = match name
+    "Int" => true
+    "Float" => true
+    "String" => true
+    "Bool" => true
+    "Array" => true
+    "Hash" => true
+    "Tuple" => true
+    "Func" => true
+    "Regex" => true
+    "Success" => true
+    "Failure" => true
+    "Maybe" => true
+    "Secret" => true
+    "Any" => true
+    _ => false;
+
+// Gradual typing: Any is compatible with everything, otherwise the names must
+// be equal.
+func type_compatible(declared, inferred) = match declared == any_type() || inferred == any_type()
+    true => true
+    false => declared == inferred;
+
+// ---------------------------------------------------------------------------
+// Expression inference
+//
+// `infer` returns {ty, errors} because a do block's statements can produce
+// findings while its value is being inferred.
+// ---------------------------------------------------------------------------
+
+func infer(st, e) = match e
+    Expr.EInt(raw) => typed("Int")
+    Expr.EFloat(raw) => typed("Float")
+    Expr.EStr(value) => typed("String")
+    Expr.EInterp(parts) => typed("String")
+    Expr.EBool(value) => typed("Bool")
+    Expr.ERegex(text) => typed("Regex")
+    Expr.EArray(elements, is_concat) => typed("Array")
+    Expr.EHash(pairs) => typed("Hash")
+    Expr.ETuple(elements) => typed("Tuple")
+    Expr.ESuccess(value) => typed("Success")
+    Expr.EFailure(value) => typed("Failure")
+    Expr.EIdent(name) => typed(get_env(st.env, name))
+    Expr.EInfix(op, left, right) => infer_infix(st, op, left, right)
+    Expr.EPrefix(op, right) => infer_prefix(st, op, right)
+    Expr.ECall(fn, args) => infer_call(st, fn)
+    Expr.ELambda(params, body) => typed("Func")
+    Expr.EDo(statements, final) => infer_do(st, statements, final)
+    _ => typed(any_type());
+
+func typed(ty) = {ty: ty, errors: []};
+
+func infer_infix(st, op, left, right) = do
+    l = infer(st, left);
+    r = infer(st, right);
+    errors2 = merge(l.errors, r.errors);
+    {ty: infix_type(op, l.ty, r.ty), errors: errors2}
+end;
+
+func infix_type(op, left, right) = match op
+    "+" => numeric_type(op, left, right)
+    "-" => numeric_type(op, left, right)
+    "*" => numeric_type(op, left, right)
+    "/" => numeric_type(op, left, right)
+    "%" => numeric_type(op, left, right)
+    "**" => numeric_type(op, left, right)
+    "==" => "Bool"
+    "!=" => "Bool"
+    "<" => "Bool"
+    ">" => "Bool"
+    "<=" => "Bool"
+    ">=" => "Bool"
+    "&&" => "Bool"
+    "||" => "Bool"
+    "&" => "Int"
+    "|" => "Int"
+    "^" => "Int"
+    "<<" => "Int"
+    ">>" => "Int"
+    _ => any_type();
+
+// Arithmetic keeps integers only when both sides are integers; a float operand
+// makes the result a float; string + string is string concatenation.
+func numeric_type(op, left, right) = match left == "Int" && right == "Int"
+    true => "Int"
+    false => numeric_type_float(op, left, right);
+
+func numeric_type_float(op, left, right) = match left == "Float" || right == "Float"
+    true => "Float"
+    false => numeric_type_string(op, left, right);
+
+func numeric_type_string(op, left, right) = match op == "+" && left == "String" && right == "String"
+    true => "String"
+    false => any_type();
+
+func infer_prefix(st, op, right) = do
+    r = infer(st, right);
+    {ty: prefix_type(op, r.ty), errors: r.errors}
+end;
+
+func prefix_type(op, operand) = match op
+    "!" => "Bool"
+    "-" => prefix_negate(operand)
+    "^" => "Int"
+    _ => any_type();
+
+func prefix_negate(operand) = match operand
+    "Int" => "Int"
+    "Float" => "Float"
+    _ => any_type();
+
+// A call to a function with a declared return type has that type.
+func infer_call(st, fn) = match fn
+    Expr.EIdent(name) => typed(declared_return(st.rets, name))
+    _ => typed(any_type());
+
+func declared_return(rets, name) = declared_return_at(rets, name, 0, len(rets));
+
+func declared_return_at(rets, name, i, n) = match i >= n
+    true => any_type()
+    false => declared_return_step(rets, name, i, n);
+
+func declared_return_step(rets, name, i, n) = match rets[i].name == name
+    true => rets[i].ty
+    false => declared_return_at(rets, name, i + 1, n);
+
+func infer_do(st, statements, final) = do
+    st2 = run_statements({env: st.env, rets: st.rets, errors: []}, statements, 0, len(statements));
+    r = infer(st2, final);
+    {ty: r.ty, errors: merge(st2.errors, r.errors)}
+end;
+
+// ---------------------------------------------------------------------------
+// Environment and error plumbing
+// ---------------------------------------------------------------------------
+
+// Lookups scan backwards so the most recent binding shadows earlier ones, which
+// is what a variable environment has to do.
+func get_env(env, name) = get_env_at(env, name, len(env) - 1);
+
+func get_env_at(env, name, i) = match i < 0
+    true => any_type()
+    false => get_env_step(env, name, i);
+
+func get_env_step(env, name, i) = match env[i].name == name
+    true => env[i].ty
+    false => get_env_at(env, name, i - 1);
+
+// set_env appends a binding; later bindings shadow earlier ones for lookups that
+// scan from the end.
+func set_env(env, name, ty) = push(env, {name: name, ty: ty});
+
+func with_env(st, env) = {env: env, rets: st.rets, errors: st.errors};
+
+func with_errors(st, errors) = {env: st.env, rets: st.rets, errors: errors};
+
+func merge(a, b) = merge_from(a, b, 0, len(b));
+
+func merge_from(acc, b, i, n) = match i >= n
+    true => acc
+    false => merge_from(push(acc, b[i]), b, i + 1, n);
+
+func annotation_name(a) = a.name;

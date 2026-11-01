@@ -208,7 +208,24 @@ risk the frame limit.
 Verified: 12 KB, 62 KB and 125 KB inputs lex in 0.16 s, 0.75 s and 1.44 s
 (linear), all byte-identical to the reference.
 
-## D13 — The type checker is deferred (open, no blocker)
+## D13 — The type checker (**done**)
+
+Implemented, with the verification gap addressed:
+
+1. `calcium check <file>` in the reference prints `<line>:<column>\ttype` per
+   finding plus a `<file>: N finding(s)` trailer (position and rule only; the
+   message is diagnostic and not contractual).
+2. `tests/typecheck/` holds twelve fixtures with deliberate mismatches:
+   annotated assignments, Any compatibility, arithmetic and string inference,
+   identifier environments, return types, parameter types, do blocks, matches
+   (always Any), constraint annotations (not types), and prefix/bitwise
+   operators.
+3. `typechecker/mod.ca` mirrors the reference: same three check sites, same
+   inference rules, `Any` compatible with everything.
+4. `tests/differential.sh` compares all twelve fixtures; the harness reports
+   112 passing comparisons with no skipped stage.
+
+Original deferral rationale, kept for the record:
 
 `typechecker` (303 Go lines) reports gradual-type mismatches through
 `calcium lint`. Across the whole corpus it produces **zero findings**
@@ -226,3 +243,19 @@ findings as `line:column rule` (position and rule only, not message text).
 SH-3 note: `constraint.ca` is excluded from the compile stage for the adjacent
 reason — the reference rejects it with a static-constraint error, and that
 checker is the piece that is not implemented.
+
+## D15 — Parse errors are not reported by the candidate parser (open)
+
+`typechecker`'s `check` command reports `parse errors` for a file the reference
+parser rejects, and the candidate is more permissive: `pkg/vm/stdlib/core/io.ca`
+uses `++`, which both lexers split into two `+` tokens, but the candidate's
+expression parser falls back to a wildcard instead of failing. That is the same
+fallback that keeps the parser from hanging (see D14).
+
+Consequence: on the 57-file corpus the check outputs agree on 56; `io.ca`
+differs only in that line. The harness's check stage runs the fixtures, which do
+not exercise parse errors.
+
+Implementing parse-error *reporting* would mean tracking a failure flag through
+the parser and surfacing it in `main.ca`; the `check` command would then print
+`<file>: parse errors` to match. Not started.

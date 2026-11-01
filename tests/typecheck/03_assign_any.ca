@@ -1,0 +1,2 @@
+func identity(v) = v;
+x: Int = identity("oops");

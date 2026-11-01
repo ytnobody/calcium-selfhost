@@ -125,7 +125,21 @@ func parse_statement(toks) = match kind(toks)
 
 func parse_statement_other(toks) = match peek_kind(toks) == "=" && kind(toks) == "IDENT"
     true => parse_assignment(toks)
+    false => parse_statement_annot(toks);
+
+// `x: Int = value` binds with a type annotation. Only built-in type names are
+// accepted, as in the reference.
+func parse_statement_annot(toks) = match kind(toks) == "IDENT" && peek_kind(toks) == ":" && peek3_kind(toks) == "=" && is_builtin_type(lit(rest(rest(toks))))
+    true => parse_annotated_assignment(toks)
     false => parse_statement_rest(toks);
+
+func parse_annotated_assignment(toks) = do
+    name = lit(toks)
+    annot_tok = rest(rest(toks))
+    annot = {name: lit(annot_tok), line: cur(annot_tok).line, col: cur(annot_tok).column}
+    r = parse_expression(rest(rest(rest(rest(toks)))), 1)
+    {s: ast.SAssignAnnot(name, annot, r.e), t: eat_semicolon(r.t)}
+end;
 
 func parse_statement_rest(toks) = match kind(toks) == "["
     true => parse_bracket_statement(toks)
@@ -195,7 +209,7 @@ end;
 // built-in type name is not a constraint and is dropped.
 func parse_return_annotation(toks) = match is_kind(toks, ":")
     true => parse_return_annotation_name(rest(toks))
-    false => {c: "", t: toks};
+    false => {c: {name: "", line: 0, col: 0}, t: toks};
 
 func parse_return_annotation_name(toks) = do
     first = lit(toks)
@@ -203,7 +217,7 @@ func parse_return_annotation_name(toks) = do
     after = skip_question(parts.t)
     // A return annotation is kept even when it is a built-in type name: the
     // compiler enforces it as a constraint and skips names it cannot resolve.
-    {c: parts.text, t: after}
+    {c: {name: parts.text, line: cur(toks).line, col: cur(toks).column}, t: after}
 end;
 
 func skip_question(toks) = match is_kind(toks, "?")
@@ -245,7 +259,7 @@ func parse_param_constraint(toks) = match is_kind(toks, ":")
 // parameter without an annotation does not consume the delimiter.
 func parse_annotation(toks) = match is_kind(toks, ":")
     true => parse_annotation_body(rest(toks))
-    false => {c: "", ty: "", t: toks};
+    false => {c: "", ty: {name: "", line: 0, col: 0}, t: toks};
 
 func parse_annotation_body(toks) = do
     first = lit(toks)
@@ -255,12 +269,12 @@ func parse_annotation_body(toks) = do
         true => rest(parts.t)
         false => parts.t
     {c: annotation_text(first, parts.text, parts.composite, has_q),
-     ty: annotation_type(first, parts.composite, has_q), t: after}
+     ty: annotation_type_record(first, parts.composite, has_q, toks), t: after}
 end;
 
-func annotation_type(first, composite, has_q) = match !composite && !has_q && is_builtin_type(first)
-    true => first
-    false => "";
+func annotation_type_record(first, composite, has_q, toks) = match !composite && !has_q && is_builtin_type(first)
+    true => {name: first, line: cur(toks).line, col: cur(toks).column}
+    false => {name: "", line: 0, col: 0};
 
 // parse_composite accumulates `A & B` / `A | B` into one textual annotation.
 func parse_composite(toks, text, composite) = match is_kind(toks, "&") || is_kind(toks, "|")
@@ -848,7 +862,10 @@ func parse_block_statements(toks, acc) = match is_kind(toks, "}") || at_end(toks
 // compiler see them.
 func parse_do(toks) = split_do(parse_do_body(rest(toks), []));
 
-func parse_do_body(toks, acc) = match kind(toks) == "end" || at_end(toks)
+// `end` is a contextual word, lexed as an identifier: match on the literal.
+func is_end(toks) = kind(toks) == "IDENT" && lit(toks) == "end";
+
+func parse_do_body(toks, acc) = match is_end(toks) || at_end(toks)
     true => {ss: acc, t: rest(toks)}
     false => parse_do_statement(toks, acc);
 

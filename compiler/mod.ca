@@ -164,12 +164,13 @@ func compile_statement(st, stmt) = match stmt
     Stmt.SFunc(name, params, constraints, types, rc, body, is_effect) => compile_function(st, name, params, effective_constraints(constraints, types), rc, is_effect, body)
     Stmt.SAssign(name, value) => compile_assign(st, name, value)
     Stmt.SType(name, variants) => compile_variants(st, name, variants, 0, len(variants))
-    Stmt.SConstraint(name, params, body) => compile_function(st, name, params, [], "", false, body)
+    Stmt.SConstraint(name, params, body) => compile_function(st, name, params, [], no_annotation(), false, body)
     _ => st;
 
 // A function declaration compiles its body into a FunctionRecord constant and
 // leaves a closure for it in a global.
-func compile_function(st, name, params, constraints, return_constraint, is_effect, body) = do
+func compile_function(st, name, params, constraints, return_annot, is_effect, body) = do
+    return_constraint = annotation_name(return_annot);
     inner = with_fresh_locals(st, params);
     guarded = emit_param_checks(inner, params, constraints, 0);
     compiled = compile_checked_body(guarded, body, constraints, return_constraint, is_effect);
@@ -219,8 +220,13 @@ func merge_constraints(constraints, types, i, n, acc) = match i >= n
     false => merge_constraints(constraints, types, i + 1, n, push(acc, merge_one(constraint_at(constraints, i), constraint_at(types, i))));
 
 func merge_one(c, ty) = match c == ""
-    true => ty
+    true => annotation_name(ty)
     false => c;
+
+// annotation_name reads the name out of an annotation record; "" means none.
+func annotation_name(a) = a.name;
+
+func no_annotation() = {name: "", line: 0, col: 0};
 
 func constraint_at(cs, i) = match i < len(cs)
     true => cs[i]

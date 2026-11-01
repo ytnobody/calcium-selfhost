@@ -1,0 +1,4 @@
+a: Int = 1 + 2;
+b: Float = 1 + 2.5;
+c: String = "a" + "b";
+d: Int = 1 + 2.5;

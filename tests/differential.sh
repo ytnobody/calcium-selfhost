@@ -62,8 +62,10 @@ fail_case() { # fail_case <label> <detail-file>
 
 lint_self() {
     local files=()
+    # tests/typecheck holds fixtures with deliberate type errors; they are inputs
+    # to the checker stage, not code that has to lint cleanly.
     while IFS= read -r f; do files+=("$f"); done < <(
-        find "$ROOT" -name '*.ca' -not -path '*/.*' | sort
+        find "$ROOT" -name '*.ca' -not -path '*/.*' -not -path "$ROOT/tests/typecheck/*" | sort
     )
     if [[ ${#files[@]} -eq 0 ]]; then
         echo "error: no Calcium sources found in $ROOT" >&2
@@ -104,6 +106,36 @@ have_component() { # have_component <name>
     # surface it yet, so read the source. This stays honest before and after a
     # component lands.
     grep -q 'func implemented() = true' "$ROOT/$1/mod.ca" 2>/dev/null
+}
+
+# --- Stage 0: type checker ---------------------------------------------------
+# The checker only has observable output on inputs with annotations, so it is
+# compared on the fixture corpus in tests/typecheck (which deliberately contains
+# mismatches) rather than on the main corpus.
+
+run_check() {
+    if ! have_component typechecker; then
+        echo "skip check (type checker not implemented)"
+        skip=$((skip + 1))
+        return 0
+    fi
+    local files
+    mapfile -t files < <(find "$ROOT/tests/typecheck" -name '*.ca' | sort)
+    if [[ ${#files[@]} -eq 0 ]]; then
+        echo "skip check (no fixtures)"
+        skip=$((skip + 1))
+        return 0
+    fi
+    local f out_oracle out_cand
+    for f in "${files[@]}"; do
+        if ! "$ORACLE" check "$f" </dev/null >"$WORK/ck.oracle" 2>&1; then :; fi
+        if ! candidate check "$f" </dev/null >"$WORK/ck.cand" 2>&1; then :; fi
+        if diff -u "$WORK/ck.oracle" "$WORK/ck.cand" >"$WORK/ck.diff" 2>&1; then
+            pass=$((pass + 1))
+        else
+            fail_case "check: $f" "$WORK/ck.diff"
+        fi
+    done
 }
 
 # --- Stage 1: lexer ----------------------------------------------------------
@@ -251,6 +283,7 @@ echo "corpus:    $CORPUS"
 echo
 
 lint_self || exit 1
+run_check
 run_lex
 run_fmt
 run_compile

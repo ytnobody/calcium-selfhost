@@ -52,6 +52,8 @@ func format_statement(stmt, d) = match stmt
     Stmt.SUse(path, effect) => use_line(path, effect, d)
     Stmt.SNamespace(path) => concat(indent(d), "namespace ", path, ";\n")
     Stmt.SAssign(name, value) => concat(indent(d), name, " = ", expr(value, d), ";\n")
+    // The annotation is runtime-relevant but not printed, matching the reference.
+    Stmt.SAssignAnnot(name, type_name, value) => concat(indent(d), name, " = ", expr(value, d), ";\n")
     Stmt.SArrayDestr(names, value) => concat(indent(d), "[", string.join(names, ", "), "] = ", expr(value, d), ";\n")
     Stmt.SHeadTailDestr(head, tail, value) => concat(indent(d), "[", head, " | ", tail, "] = ", expr(value, d), ";\n")
     Stmt.SFunc(name, params, constraints, param_types, return_constraint, body, is_effect) => function_decl(name, params, constraints, body, is_effect, d)

@@ -1,0 +1,4 @@
+x: Int = 1;
+y: String = "ok";
+z: Float = 1.5;
+b: Bool = true;

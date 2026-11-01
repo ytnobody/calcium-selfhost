@@ -67,6 +67,7 @@ type Stmt =
     SUse(path, is_effect) |
     SNamespace(path) |
     SAssign(name, value) |
+    SAssignAnnot(name, annot, value) |
     SArrayDestr(names, value) |
     SHeadTailDestr(head, tail, value) |
     SFunc(name, params, constraints, param_types, return_constraint, body, is_effect) |

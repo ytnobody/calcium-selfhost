@@ -1,0 +1,9 @@
+func f() = do
+    inner = 1;
+    inner
+end;
+x: Int = f();
+y: Int = do
+    p = "s";
+    p
+end;

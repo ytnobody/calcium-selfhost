@@ -1,0 +1,2 @@
+func f(a: Positive) = a;
+x: Int = 1;

@@ -1,0 +1,4 @@
+func f(n) = match n
+    0 => 1
+    _ => 2;
+x: Int = f(3);

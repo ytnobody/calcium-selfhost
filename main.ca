@@ -7,6 +7,7 @@ use parser;
 use formatter;
 use compiler;
 use serialize;
+use typechecker;
 
 // calcium-selfhost CLI entry point.
 //
@@ -25,6 +26,7 @@ func usage_lines() = [
     "  version                   print the candidate version",
     "  lex <in>                  dump the token stream",
     "  parse <in>                dump the AST summary (debugging only)",
+    "  check <in>                dump type checker findings (debugging only)",
     "  fmt <in> -o <out>         format <in> into <out>",
     "  compile <in> -o <out>     compile <in> into <out> (.bone)"
 ];
@@ -129,6 +131,25 @@ func compile_file(argv) = do
     io.write_file(output, serialize.to_string_bytes(compiler.to_bone(st)))
 end;
 
+// check_file prints one finding per line as `<line>:<column>\ttype`, matching
+// `calcium check`.
+func check_file(path) = do
+    src = read_source(path)
+    parsed = parser.parse_program(lexer.tokenize(src))
+    findings = typechecker.check(parsed.statements)
+    check_print(findings, 0, len(findings))
+    concat(path, ": ", to_string(len(findings)), " finding(s)") !> io.say
+end;
+
+func check_print(findings, i, n) = match i >= n
+    true => 0
+    false => check_print_one(findings, i, n);
+
+func check_print_one(findings, i, n) = do
+    concat(to_string(findings[i].line), ":", to_string(findings[i].col), "\ttype") !> io.say
+    check_print(findings, i + 1, n)
+end;
+
 func read_source(path) = io.read_file(path) !? {
     success(v) => v
     failure(e) => ""
@@ -148,6 +169,7 @@ match get(args, 2)
     Maybe.Some("parse") => parse_file(get(args, 3, ""))
     Maybe.Some("fmt") => fmt_file(args)
     Maybe.Some("compile") => compile_file(args)
+    Maybe.Some("check") => check_file(get(args, 3, ""))
     Maybe.Some("help") => usage() !> io.say
     Maybe.Some(cmd) => unimplemented(cmd)
     Maybe.None => do

@@ -32,7 +32,7 @@ SH-2 progress:
 - **parser + formatter done for the corpus** — formatted output is byte-identical
   to `calcium fmt` on all 47 corpus files and 9 files from the dependent
   repositories.
-- **type checker** — not started; see D13.
+- **type checker** — done, verified against twelve fixtures with `calcium check`; see D13.
 
 SH-3 progress: the compiler emits .bone that behaves like the reference on every
 comparable corpus file (100 comparisons pass). Three files are excluded: two

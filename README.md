@@ -28,7 +28,7 @@ drift.
 |---|---|
 | lexer | SH-2, done |
 | parser, AST, formatter | SH-2, done for the corpus |
-| type checker | SH-2 |
+| type checker | SH-2, done |
 | compiler (emits `.bone`) | SH-3 |
 | formatter | SH-2 |
 | linter | SH-3 |

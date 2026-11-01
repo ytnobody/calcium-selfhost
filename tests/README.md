@@ -14,6 +14,7 @@ ORACLE=/tmp/calcium CALCIUM_LANG=../calcium-lang bash tests/differential.sh
 | Stage | Comparison | Verdict |
 |---|---|---|
 | always | `calcium lint` over every `.ca` in this repository | must pass |
+| type checker | `calcium check` findings per fixture in `tests/typecheck/` | identical positions and rules |
 | lexer | `calcium lex` token dump per corpus file | byte-identical |
 | formatter | `calcium fmt` output per corpus file | byte-identical |
 | formatter | `calcium fmt` output, on a copy of each corpus file | byte-identical |
