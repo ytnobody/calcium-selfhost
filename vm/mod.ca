@@ -267,7 +267,14 @@ end;
 // advance moves the instruction pointer past the instruction at `ip`.
 func advance(st, ip) = set_ip(st, ip + width(cl_body(frame_cl(current(st))), ip));
 
-func fail(st, message) = {ok: false, st: set_state(st, st.stack, st.top, [], message, st.globals)};
+// fail records a runtime error and unwinds every frame, naming the function that
+// was executing so a no-match is diagnosable.
+func fail(st, message) = {ok: false, st: set_state(st, st.stack, st.top, [], failed_message(st, message), st.globals)};
+
+func failed_message(st, message) = match len(st.frames) == 0
+    true => message
+    false => concat(message, " (in ", fn_name(frame_cl(current(st))),
+        " at ", to_string(frame_ip(current(st))), ")");
 func done(st) = {ok: true, st: st};
 
 func dispatch(st, op, ip) = match op
@@ -325,10 +332,16 @@ func dispatch(st, op, ip) = match op
     bytecode.is_success() => op_is_wrapped(st, ip, true)
     bytecode.is_failure() => op_is_wrapped(st, ip, false)
     bytecode.unwrap() => op_unwrap(st, ip)
-    bytecode.match_fail() => fail(st, "no match arm matched")
+    bytecode.match_fail() => op_match_fail(st, ip)
     _ => fail(st, concat("unsupported opcode ", to_string(op)));
 
 func set_ip_after(st, ip) = done(set_ip(st, ip));
+
+// A no-match reports the subject, which is what makes this diagnosable.
+func op_match_fail(st, ip) = do
+    r = pop_value(st);
+    fail(r.st, concat("no match arm matched ", vm_to_string(r.v)))
+end;
 
 // ---------------------------------------------------------------------------
 // Simple opcodes
@@ -382,7 +395,7 @@ func set_globals(st, globals) = set_state(st, st.stack, st.top, st.frames, st.la
 
 func op_get_free(st, ip) = do
     idx = read_u8(cl_body(frame_cl(current(st))), ip);
-    done(advance(push_value(st, cl_free(current(st).cl)[idx]), ip))
+    done(advance(push_value(st, cl_free(frame_cl(current(st)))[idx]), ip))
 end;
 
 func op_closure(st, ip) = do
@@ -496,12 +509,18 @@ func op_call(st, ip, nargs) = do
     apply(unwrap_callee(run_callee(st1, callee, base, nargs, false), st1))
 end;
 
-// A tail call replaces the frame, so the current program counter is discarded and
-// needs no advancing.
+// A tail call to a closure replaces the frame, so the current program counter is
+// discarded and needs no advancing. A tail call to a builtin or host function has
+// no frame to replace, so it has to return from the current frame - otherwise the
+// frame would keep executing with the callee's result on top of its stack, and any
+// caller looping until the frame count drops (map, filter, reduce) would spin.
 func op_tail_call(st, ip, nargs) = do
     base = st.top - nargs;
     callee = st.stack[base - 1];
-    apply(unwrap_callee(run_callee(st, callee, base, nargs, true), st))
+    r = unwrap_callee(run_callee(st, callee, base, nargs, true), st);
+    match r.finished
+        true => return_value(r.st, r.v)
+        false => done(r.st)
 end;
 
 // run_callee is an effect function, so its result is normally wrapped in success.
@@ -540,20 +559,29 @@ func call_closure(st, callee, base, nargs, tail) = do
     // pops) can happen before that, so the array has to reach `top`.
     st2 = set_state(st, ensure_size(st.stack, top), top, st.frames, st.last, st.globals);
     match tail
-        true => {finished: false, st: set_frame_tail(st2, callee)}
+        true => {finished: false, st: set_frame_tail(st2, callee, base)}
         false => {finished: false, st: push_frame(st2, callee, base)}
 end;
 
-func set_frame_tail(st, callee) = set_frame(st, make_frame(callee, 0, frame_base(current(st))));
+// A tail call replaces the current frame. Its base is where the callee's arguments
+// start, not the *previous* frame's base: using the latter makes the callee read
+// its caller's locals.
+func set_frame_tail(st, callee, base) = set_frame(st, make_frame(callee, 0, base));
 
 // A return removes the frame, drops the callee and argument slots, and leaves the
 // return value in their place for the caller.
 func op_ret(st, ip) = do
     r = pop_value(st);
+    return_value(r.st, r.v)
+end;
+
+// return_value pops the current frame and leaves `v` where the callee and its
+// arguments were.
+func return_value(st, v) = do
     base = frame_base(current(st));
-    st2 = pop_frame(r.st);
-    st3 = set_state(st2, st2.stack, base - 1, st2.frames, r.v, st2.globals);
-    {ok: true, st: push_value(st3, r.v)}
+    st2 = pop_frame(st);
+    st3 = set_state(st2, st2.stack, base - 1, st2.frames, v, st2.globals);
+    {ok: true, st: push_value(st3, v)}
 end;
 
 // ---------------------------------------------------------------------------
@@ -617,9 +645,10 @@ func member_of(obj, name) = match types.is_hash(obj)
     false => obj;
 
 // A module is represented as a hash with a `__module` marker.
+// Member access yields the value itself, not a Maybe: `h.name` is a field read.
 func module_or_hash(obj, name) = match get(obj, "__module", "")
     "core.io" => module_member("core.io", name)
-    _ => get(obj, name);
+    _ => get(obj, name, 0);
 
 func op_load_module(st, ip) = do
     path = member_name(st, read_u16(cl_body(frame_cl(current(st))), ip));
@@ -699,15 +728,126 @@ func unwrapped(v) = match v
 // Builtin calls
 // ---------------------------------------------------------------------------
 
+// Higher-order builtins call back into the interpreter, so they are handled
+// before the plain `apply_builtin` table.
+//
+// The argument order is the one the compiler emits: `arr |> map(f)` pushes the
+// array and then the function, and `reduce` pushes (array, init, function) - which
+// is *not* what the reference VM expects, so `reduce` fails there too. That
+// failure is reproduced rather than fixed, because behaviour is the contract.
 func call_builtin_value(st, index, base, nargs) = do
     r = pop_n(st, nargs);
-    result = apply_builtin(builtin_name(index), r.items);
     remaining = set_state(r.st, r.st.stack, base - 1, r.st.frames, r.st.last, r.st.globals);
-    {finished: true, st: remaining, v: result}
+    name = builtin_name(index);
+    match name
+        "map" => higher_order_map(remaining, r.items)
+        "filter" => higher_order_filter(remaining, r.items)
+        "reduce" => higher_order_reduce(remaining, r.items)
+        _ => {finished: true, st: remaining, v: apply_builtin(name, r.items)}
 end;
+
+// call_sync runs a closure to completion and returns its value, leaving the
+// caller's stack pointer where it was.
+func call_sync(st, fn, arg_values) = do
+    top0 = st.top;
+    base = st.top;
+    // The callee sits at `base` and the arguments follow it, so the frame's locals
+    // start one slot later. Getting this wrong makes local 0 the callee itself.
+    pushed = push_value(st, fn);
+    with_args = push_values(pushed, arg_values, 0, len(arg_values));
+    started = start_frame(with_args, fn, base + 1);
+    ran = run_until(started, len(st.frames));
+    {st: set_state(ran, ran.stack, top0, ran.frames, ran.last, ran.globals),
+     v: stack_at(ran.stack, base)}
+end;
+
+func push_values(st, values, i, n) = match i >= n
+    true => st
+    false => push_values(push_value(st, values[i]), values, i + 1, n);
+
+func start_frame(st, fn, base) = do
+    locals_count = cl_locals(fn);
+    top = base + locals_count;
+    set_state(st, ensure_size(st.stack, top), top, push(st.frames, make_frame(fn, 0, base)), st.last, st.globals)
+end;
+
+func run_until(st, target) = match len(st.frames) <= target
+    true => st
+    false => run_until(step(st), target);
+
+// is_callable covers the interpreter's own function wrappers, which Calcium's
+// type predicates do not know about.
+func is_callable(v) = match v
+    Closure(record, frees) => true
+    BuiltinFn(index) => true
+    HostFn(name) => true
+    _ => false;
+
+func higher_order_map(st, items) = match len(items) == 2 && types.is_array(items[0])
+    true => do
+        r = map_loop(st, items[1], items[0], 0, len(items[0]), []);
+        {finished: true, st: r.st, v: r.items}
+    end
+    false => {finished: true, st: st, v: failure("map: expected 2 arguments (array, fn)")};
+
+func map_loop(st, fn, arr, i, n, acc) = match i >= n
+    true => {st: st, items: acc}
+    false => do
+        r = call_sync(st, fn, [arr[i]]);
+        map_loop(r.st, fn, arr, i + 1, n, push(acc, r.v))
+    end;
+
+func higher_order_filter(st, items) = match len(items) == 2 && types.is_array(items[0])
+    true => do
+        r = filter_loop(st, items[1], items[0], 0, len(items[0]), []);
+        {finished: true, st: r.st, v: r.items}
+    end
+    false => {finished: true, st: st, v: failure("filter: expected 2 arguments (array, fn)")};
+
+func filter_loop(st, fn, arr, i, n, acc) = match i >= n
+    true => {st: st, items: acc}
+    false => do
+        r = call_sync(st, fn, [arr[i]]);
+        filter_loop(r.st, fn, arr, i + 1, n, keep_if(r.v, acc, arr[i]))
+    end;
+
+func keep_if(v, acc, element) = match v
+    true => push(acc, element)
+    _ => acc;
+
+// reduce reads its function from position 2, as the reference VM does. The
+// compiler pushes the initial value there, so a piped reduce reports the same
+// failure the reference reports.
+func higher_order_reduce(st, items) = match len(items) == 3 && types.is_array(items[0]) && is_callable(items[1])
+    true => do
+        r = reduce_loop(st, items[1], items[0], items[2], 0, len(items[0]));
+        {finished: true, st: r.st, v: r.acc}
+    end
+    false => {finished: true, st: st, v: reduce_failure(items)};
+
+func reduce_failure(items) = match len(items) == 3 && types.is_array(items[0])
+    true => failure("reduce: second argument must be function")
+    false => failure("reduce: expected 3 arguments (array, fn, init)");
+
+func reduce_loop(st, fn, arr, acc, i, n) = match i >= n
+    true => {st: st, acc: acc}
+    false => do
+        r = call_sync(st, fn, [acc, arr[i]]);
+        reduce_loop(r.st, fn, arr, r.v, i + 1, n)
+    end;
 
 func apply_builtin(name, args) = match name
     "len" => len_of(args[0])
+    "get" => builtin_get(args)
+    "has" => builtin_has(args)
+    "head" => builtin_head(args)
+    "tail" => builtin_tail(args)
+    "push" => builtin_push(args)
+    "range" => builtin_range(args)
+    "keys" => keys(args[0])
+    "values" => values(args[0])
+    "hash_set" => hash_set(args[0], args[1], args[2])
+    "hash_merge" => hash_merge(args[0], args[1])
     "concat" => concat_values(args)
     "to_string" => to_string(args[0])
     "Int" => types.is_int(args[0])
@@ -727,6 +867,27 @@ func apply_builtin(name, args) = match name
     "NonEmpty" => len_of(args[0]) > 0
     "Empty" => len_of(args[0]) == 0
     _ => failure(concat("unsupported builtin: ", name));
+
+// get(collection, key) yields a Maybe; the three-argument form yields the value
+// or a default, which is what `h[k]` compiles to in this interpreter.
+func builtin_get(args) = match len(args) == 3
+    true => get(args[0], args[1], args[2])
+    false => get(args[0], args[1]);
+
+func builtin_has(args) = has(args[0], args[1]);
+
+func builtin_head(args) = head(args[0]);
+
+func builtin_tail(args) = tail(args[0]);
+
+func builtin_push(args) = push(args[0], args[1]);
+
+// range(end) / range(start, end) / range(start, end, step), as the reference
+// builds them.
+func builtin_range(args) = match len(args)
+    1 => range(0, args[0])
+    2 => range(args[0], args[1])
+    _ => range(args[0], args[1], args[2]);
 
 func len_of(v) = match types.is_array(v)
     true => len(v)
