@@ -99,7 +99,8 @@ end;
 func exports_hash(names, globals, i, n, acc) = match i >= n
     true => acc
     false => exports_hash(names, globals, i + 1, n,
-        hash_set(acc, names[i].name, globals_value(globals, names[i].index)));
+        hash_set(acc, names[i].name,
+            vm.adopt_globals(globals_value(globals, names[i].index), globals)));
 
 func globals_value(globals, index) = match index < len(globals)
     true => globals[index]

@@ -30,7 +30,7 @@ use serialize;
 // ---------------------------------------------------------------------------
 
 type Value =
-    Closure(record, free, consts) |
+    Closure(record, free, consts, globals) |
     BuiltinFn(index) |
     AdtVal(type_name, tag, items) |
     HostFn(name);
@@ -102,7 +102,7 @@ func set_frame(st, f) = set_state(st, st.stack, st.top,
 // A Frame is an ADT, so its fields are destructured.
 func frame_cl(f) = match f
     Frame.Frame(cl, ip, base) => cl
-    _ => Closure(serialize.FunctionRecord("", "entry", [], 0, false, []), [], []);
+    _ => Closure(serialize.FunctionRecord("", "entry", [], 0, false, []), [], [], []);
 
 func frame_ip(f) = match f
     Frame.Frame(cl, ip, base) => ip
@@ -129,7 +129,7 @@ func constant_value(c) = match c
     Constant.CFloat(v) => v
     Constant.CStr(v) => v
     Constant.CAdt(name, tag, items) => AdtVal(name, tag, map_constants(items, 0, len(items), []))
-    Constant.CFunc(record) => Closure(record, [], select_constants(record))
+    Constant.CFunc(record) => Closure(record, [], select_constants(record), [])
     Constant.CRegex(pattern, flags) => compile_regex(pattern, flags)
     _ => 0;
 
@@ -240,19 +240,30 @@ func fn_num_locals(r) = match r
     _ => 0;
 
 func cl_body(cl) = match cl
-    Closure(record, free, consts) => fn_body(record)
+    Closure(record, free, consts, globals) => fn_body(record)
     _ => [];
 
 func cl_locals(cl) = match cl
-    Closure(record, free, consts) => fn_num_locals(record)
+    Closure(record, free, consts, globals) => fn_num_locals(record)
     _ => 0;
 
 func cl_free(cl) = match cl
-    Closure(record, free, consts) => free
+    Closure(record, free, consts, globals) => free
 
 func cl_consts(cl) = match cl
-    Closure(record, free, consts) => consts
-    _ => [];
+    Closure(record, free, consts, globals) => consts
+
+// cl_globals is the unit's global array, or [] when the closure belongs to the
+// program the state is already running (then the state's globals are used).
+func cl_globals(cl) = match cl
+    Closure(record, free, consts, globals) => globals
+
+// adopt_globals gives a value the unit's global array. A module's exported
+// functions are called later by the main program, but `OpGetGlobal` inside them
+// must still resolve the module's names, not the caller's.
+func adopt_globals(v, globals) = match v
+    Closure(record, free, consts, own) => Closure(record, free, consts, globals)
+    _ => v;
 
 // ---------------------------------------------------------------------------
 // Interpreter
@@ -261,7 +272,7 @@ func cl_consts(cl) = match cl
 func run(constants, instructions) = run_with_modules(constants, instructions, {});
 
 func run_with_modules(constants, instructions, modules) = do
-    main = Closure(serialize.FunctionRecord("<main>", "entry", [], 0, false, instructions), [], constants);
+    main = Closure(serialize.FunctionRecord("<main>", "entry", [], 0, false, instructions), [], constants, []);
     st = push_frame(with_modules(new_state(constants), modules), main, 0);
     exec(st)
 end;
@@ -269,7 +280,7 @@ end;
 // run_module executes a module's top-level code and returns the resulting state,
 // whose globals hold the module's exports.
 func run_module(constants, instructions, modules) = do
-    main = Closure(serialize.FunctionRecord("<module>", "entry", [], 0, false, instructions), [], constants);
+    main = Closure(serialize.FunctionRecord("<module>", "entry", [], 0, false, instructions), [], constants, []);
     st = push_frame(with_modules(new_state(constants), modules), main, 0);
     exec_state(st)
 end;
@@ -435,8 +446,13 @@ end;
 // top-level name so functions can refer to each other, which allocates indices
 // before the assignments that fill them.
 func op_get_global(st, ip) = do
-    idx = read_u16(cl_body(frame_cl(current(st))), ip);
-    done(advance(push_value(st, stack_at(st.globals, idx)), ip))
+    cl = frame_cl(current(st));
+    idx = read_u16(cl_body(cl), ip);
+    g = cl_globals(cl);
+    value = match len(g) > 0
+        true => stack_at(g, idx)
+        false => stack_at(st.globals, idx);
+    done(advance(push_value(st, value), ip))
 end;
 
 func op_set_global(st, ip) = do
@@ -457,7 +473,8 @@ func op_closure(st, ip) = do
     idx = read_u16(code, ip);
     count = code[ip + 3];
     frees = pop_n(st, count);
-    cl = Closure(constant_record(cl_consts(frame_cl(current(st)))[idx]), frees.items, cl_consts(frame_cl(current(st))));
+    outer = frame_cl(current(st));
+    cl = Closure(constant_record(cl_consts(outer)[idx]), frees.items, cl_consts(outer), cl_globals(outer));
     done(advance(push_value(frees.st, cl), ip))
 end;
 
@@ -601,7 +618,7 @@ func apply(r) = match r.finished
 // for a closure. Tail calls replace the current frame instead of growing the
 // frame stack.
 func! run_callee(st, callee, base, nargs, tail) = match callee
-    Closure(record, frees, consts) => call_closure(st, callee, base, nargs, tail)
+    Closure(record, frees, consts, globals) => call_closure(st, callee, base, nargs, tail)
     BuiltinFn(index) => call_builtin_value(st, index, base, nargs)
     HostFn(name) => call_host(st, name, base, nargs)
     _ => {finished: true, st: st, v: 0};
@@ -880,7 +897,7 @@ func run_until(st, target) = match len(st.frames) <= target
 // is_callable covers the interpreter's own function wrappers, which Calcium's
 // type predicates do not know about.
 func is_callable(v) = match v
-    Closure(record, frees, consts) => true
+    Closure(record, frees, consts, globals) => true
     BuiltinFn(index) => true
     HostFn(name) => true
     _ => false;
@@ -1163,7 +1180,7 @@ end;
 // function as `<func name>` / `<builtin name>`.
 func vm_to_string(v) = match v
     AdtVal(type_name, tag, items) => adt_to_string(tag, items)
-    Closure(record, frees, consts) => concat("<func ", fn_name(record), ">")
+    Closure(record, frees, consts, globals) => concat("<func ", fn_name(record), ">")
     BuiltinFn(index) => concat("<builtin ", builtin_name(index), ">")
     HostFn(name) => concat("<builtin ", name, ">")
     _ => to_string(v);

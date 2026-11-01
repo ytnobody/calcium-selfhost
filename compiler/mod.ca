@@ -458,7 +458,38 @@ func compile_expr(st, e) = match e
     Expr.ELambda(params, body) => compile_lambda(st, params, body)
     Expr.EMatch(subject, cases) => compile_match(st, subject, cases)
     Expr.ECall(fn, args) => compile_call_or_builtin(st, fn, args)
+    Expr.EDo(statements, final) => compile_do(st, statements, final)
+    Expr.EInterp(parts) => compile_interp(st, parts, 0, len(parts))
+    Expr.ESpread(value) => compile_spread(st, value)
+    Expr.EWild => {e: ast.EWild, st: emit(st, bytecode.ins(bytecode.true_()))}
     _ => {e: ast.EWild, st: st};
+
+// A do block evaluates its statements for their effects and yields the final
+// expression. Statements other than the last are popped; the last statement of
+// the source is the block's value, so it inherits the block's tail position (a
+// trailing call still becomes OpTailCall through mark_tail).
+func compile_do(st, statements, final) = do
+    r = compile_statements(st, statements, 0, len(statements));
+    compile_expr(r, final)
+end;
+
+// An interpolated string is a concatenation of its parts; OpAdd converts the
+// non-string parts, which is what the reference VM does.
+func compile_interp(st, parts, i, n) = match i >= n
+    true => {e: ast.EWild, st: st}
+    false => concat_parts(compile_expr(st, parts[i]), parts, i, n);
+
+func concat_parts(r, parts, i, n) = match i == 0
+    true => compile_interp(r.st, parts, i + 1, n)
+    false => concat_parts(emit2(r.st), parts, i + 1, n);
+
+func emit2(st) = emit(st, bytecode.ins(bytecode.add()));
+
+// A spread argument collects the array into the call's argument list.
+func compile_spread(st, value) = do
+    r = compile_expr(st, value);
+    {e: ast.EWild, st: emit(r.st, bytecode.ins(bytecode.spread()))}
+end;
 
 // parse_int handles decimal and 0x/0b literals. Digit separators are removed
 // first, and a non-decimal literal is converted through its digits because
