@@ -14,6 +14,9 @@
 
 namespace compiler;
 
+// implemented reports to the differential harness whether this component exists.
+func implemented() = true;
+
 use core.array;
 use core.string;
 use core.types;
@@ -42,8 +45,10 @@ func new_state() = {
 };
 
 // with_fresh_locals starts a new function body: parameters become locals 0..n-1.
+// The instruction stream starts empty — a function's body is its own record — while
+// the constant pool stays shared with the program.
 func with_fresh_locals(st, params) = {
-    code: st.code, consts: st.consts, globals: st.globals, nglobals: st.nglobals,
+    code: [], consts: st.consts, globals: st.globals, nglobals: st.nglobals,
     locals: params_locals(params, 0, len(params), []), nlocals: len(params),
     free: [], outer_locals: st.locals, outer_free: st.free, in_fn: true
 };
@@ -124,7 +129,30 @@ func define_global(st, name) = match find_global(st.globals, name, 0, len(st.glo
 // Program
 // ---------------------------------------------------------------------------
 
-func compile_program(statements) = compile_statements(new_state(), statements, 0, len(statements));
+// compile_program declares every top-level name before compiling any body, so a
+// function can refer to itself and to functions defined later.
+func compile_program(statements) = do
+    declared = predeclare(new_state(), statements, 0, len(statements));
+    compile_statements(declared, statements, 0, len(statements))
+end;
+
+func predeclare(st, ss, i, n) = match i >= n
+    true => st
+    false => predeclare(predeclare_stmt(st, ss[i]), ss, i + 1, n);
+
+func predeclare_stmt(st, stmt) = match stmt
+    Stmt.SFunc(name, params, cons, types, rc, body, eff) => define_global(st, name).st
+    Stmt.SConstraint(name, params, body) => define_global(st, name).st
+    Stmt.SType(name, variants) => predeclare_variants(st, variants, 0, len(variants))
+    _ => st;
+
+func predeclare_variants(st, vs, i, n) = match i >= n
+    true => st
+    false => predeclare_variants(predeclare_variant(st, vs[i]), vs, i + 1, n);
+
+func predeclare_variant(st, v) = match v
+    Variant.Variant(name, fields) => define_global(st, name).st
+    _ => st;
 
 func compile_statements(st, ss, i, n) = match i >= n
     true => st
@@ -133,16 +161,19 @@ func compile_statements(st, ss, i, n) = match i >= n
 func compile_statement(st, stmt) = match stmt
     Stmt.SUse(path, effect) => compile_use(st, path)
     Stmt.SExpr(e) => compile_expr_statement(st, e)
-    Stmt.SFunc(name, params, constraints, body, is_effect) => compile_function(st, name, params, is_effect, body)
+    Stmt.SFunc(name, params, constraints, types, rc, body, is_effect) => compile_function(st, name, params, effective_constraints(constraints, types), rc, is_effect, body)
     Stmt.SAssign(name, value) => compile_assign(st, name, value)
     Stmt.SType(name, variants) => compile_variants(st, name, variants, 0, len(variants))
+    Stmt.SConstraint(name, params, body) => compile_function(st, name, params, [], "", false, body)
     _ => st;
 
 // A function declaration compiles its body into a FunctionRecord constant and
 // leaves a closure for it in a global.
-func compile_function(st, name, params, is_effect, body) = do
+func compile_function(st, name, params, constraints, return_constraint, is_effect, body) = do
     inner = with_fresh_locals(st, params);
-    compiled = compile_body(inner, body);
+    guarded = emit_param_checks(inner, params, constraints, 0);
+    compiled = compile_checked_body(guarded, body, constraints, return_constraint, is_effect);
+
     record = serialize.FunctionRecord(name, "entry", params, compiled.st.nlocals, is_effect, compiled.st.code);
     listed = add_constant(with_consts(st, compiled.st.consts), serialize.CFunc(record));
     loaded = load_captures(listed.st, compiled.st.free, 0, len(compiled.st.free));
@@ -178,10 +209,126 @@ func emit_global_load(st, name) = match find_global(st.globals, name, 0, len(st.
     Maybe.Some(index) => emit(st, bytecode.ins_u16(bytecode.get_global(), index))
     Maybe.None => st;
 
+// effective_constraints merges the two annotation arrays: an explicit constraint
+// wins, otherwise a built-in type annotation is enforced as one (which is what
+// the reference compiler does, even though the formatter does not print it).
+func effective_constraints(constraints, types) = merge_constraints(constraints, types, 0, len(constraints), []);
+
+func merge_constraints(constraints, types, i, n, acc) = match i >= n
+    true => acc
+    false => merge_constraints(constraints, types, i + 1, n, push(acc, merge_one(constraint_at(constraints, i), constraint_at(types, i))));
+
+func merge_one(c, ty) = match c == ""
+    true => ty
+    false => c;
+
+func constraint_at(cs, i) = match i < len(cs)
+    true => cs[i]
+    false => "";
+
+func has_constraints(constraints) = any_constraint(constraints, 0, len(constraints));
+
+func any_constraint(cs, i, n) = match i >= n
+    true => false
+    false => match cs[i] == ""
+        true => any_constraint(cs, i + 1, n)
+        false => true;
+
+// A constrained parameter is checked on entry; a violation returns
+// failure(value) instead of running the body.
+func emit_param_checks(st, params, constraints, i) = match i >= len(params)
+    true => st
+    false => match constraint_at(constraints, i) == ""
+        true => emit_param_checks(st, params, constraints, i + 1)
+        false => emit_param_checks(emit_param_check(st, i, constraint_at(constraints, i)), params, constraints, i + 1);
+
+func emit_param_check(st, i, name) = do
+    s1 = emit(st, bytecode.ins_u8(bytecode.get_local(), i));
+    s2 = compile_callee(s1, ast.EIdent(name)).st;
+    s3 = emit(s2, bytecode.ins_u8(bytecode.get_local(), i));
+    s4 = emit(s3, bytecode.ins_u8(bytecode.call(), 1));
+    jump_pos = len(s4.code);
+    s5 = emit(s4, bytecode.ins_u16(bytecode.jump_if_true(), 0));
+    s6 = emit(s5, bytecode.ins(bytecode.pop()));
+    s7 = emit(s6, bytecode.ins_u8(bytecode.get_local(), i));
+    s8 = emit(s7, bytecode.ins(bytecode.wrap_failure()));
+    s9 = emit(s8, bytecode.ins(bytecode.ret()));
+    s10 = patch_u16(s9, jump_pos, len(s9.code));
+    emit(s10, bytecode.ins(bytecode.pop()))
+end;
+
+// compile_checked_body finishes a function body: it applies the return
+// constraint, wraps the result in success when the function is an effect
+// function or has any constraint, and returns.
+//
+// A tail call is only marked when no return check follows it; otherwise the check
+// would be skipped.
+func compile_checked_body(st, body, constraints, return_constraint, is_effect) = do
+    r = compile_expr(st, body);
+    tailed = match return_constraint == ""
+        true => mark_tail(r.st)
+        false => r.st;
+    checked = emit_return_check(tailed, return_constraint);
+    wrapped = match is_effect || has_constraints(constraints) || return_constraint != ""
+        true => emit(checked, bytecode.ins(bytecode.wrap_success()))
+        false => checked;
+    {e: ast.EWild, st: emit(wrapped, bytecode.ins(bytecode.ret()))}
+end;
+
+// emit_return_check runs the return constraint against the value on the stack:
+// a violation returns failure(value) instead of success(value).
+func emit_return_check(st, rc) = match rc == "" || !is_resolvable(st, rc)
+    true => st
+    false => do
+        st2 = define_local(st, "__return__");
+        tmp = st2.nlocals - 1;
+        s1 = emit(st2, bytecode.ins_u8(bytecode.set_local(), tmp));
+        s2 = compile_callee(s1, ast.EIdent(rc)).st;
+        s3 = emit(s2, bytecode.ins_u8(bytecode.get_local(), tmp));
+        s4 = emit(s3, bytecode.ins_u8(bytecode.call(), 1));
+        jump_pos = len(s4.code);
+        s5 = emit(s4, bytecode.ins_u16(bytecode.jump_if_true(), 0));
+        s6 = emit(s5, bytecode.ins_u8(bytecode.get_local(), tmp));
+        s7 = emit(s6, bytecode.ins(bytecode.wrap_failure()));
+        s8 = emit(s7, bytecode.ins(bytecode.ret()));
+        s9 = patch_u16(s8, jump_pos, len(s8.code));
+        emit(s9, bytecode.ins_u8(bytecode.get_local(), tmp))
+    end;
+
+// is_resolvable reports whether a name is a builtin or a declared global, which
+// is what makes a return annotation enforceable.
+func is_resolvable(st, name) = match builtin_index(ast.EIdent(name))
+    Maybe.Some(_) => true
+    Maybe.None => find_global_any(st, name);
+
+func find_global_any(st, name) = match find_global(st.globals, name, 0, len(st.globals))
+    Maybe.Some(_) => true
+    Maybe.None => false;
+
+// compile_body_wrapped finishes a function body, wrapping the result in success
+// when the function has constraints (which makes it return a Result).
+func compile_body_wrapped(st, body, wrapped) = do
+    r = compile_expr(st, body);
+    tailed = mark_tail(r.st);
+    w = match wrapped
+        true => emit(tailed, bytecode.ins(bytecode.wrap_success()))
+        false => tailed;
+    {e: ast.EWild, st: emit(w, bytecode.ins(bytecode.ret()))}
+end;
+
 func compile_body(st, body) = do
     r = compile_expr(st, body);
-    {e: ast.EWild, st: emit(r.st, bytecode.ins(bytecode.ret()))}
+    tailed = mark_tail(r.st);
+    {e: ast.EWild, st: emit(tailed, bytecode.ins(bytecode.ret()))}
 end;
+
+// mark_tail rewrites a trailing OpCall into OpTailCall. A call in tail position
+// must reuse the frame, otherwise a deep recursion grows the stack to the frame
+// limit. OpCall is two bytes (opcode + argument count), so the opcode to rewrite
+// sits at len-2.
+func mark_tail(st) = match len(st.code) >= 2 && st.code[len(st.code) - 2] == bytecode.call()
+    true => with_code(st, replace_range(st.code, len(st.code) - 2, [bytecode.tail_call()]))
+    false => st;
 
 // A top-level assignment binds a global; inside a function it binds a local, as
 // the reference does. Variables are immutable, so a name is bound once.
@@ -266,6 +413,7 @@ end;
 func compile_expr(st, e) = match e
     Expr.EStr(value) => compile_const(st, serialize.CStr(value))
     Expr.EInt(raw) => compile_const(st, serialize.CInt(parse_int(raw)))
+    Expr.EFloat(raw) => compile_const(st, serialize.CFloat(parse_float(raw)))
     Expr.EBool(value) => compile_bool(st, value)
     Expr.EIdent(name) => compile_ident(st, name)
     Expr.EMember(object, property) => compile_member(st, object, property)
@@ -281,6 +429,8 @@ func compile_expr(st, e) = match e
     Expr.EReturn(value) => compile_return(st, value)
     Expr.ERegex(text) => compile_regex(st, text)
     Expr.EConstraintCheck(target) => compile_constraint_check(st, target)
+    Expr.EStay(state_init, body) => compile_stay(st, state_init, body)
+    Expr.EEffectHandle(subject, sv, sb, fv, fb) => compile_handler(st, subject, sv, sb, fv, fb)
     Expr.EHash(pairs) => compile_hash(st, pairs)
     Expr.ELambda(params, body) => compile_lambda(st, params, body)
     Expr.EMatch(subject, cases) => compile_match(st, subject, cases)
@@ -301,6 +451,12 @@ func remove_underscores_1(s, i, n, acc, ch) = match ch
         true => acc
         false => concat(acc, c))
     Maybe.None => acc;
+
+// parse_float reads the source text of a float literal.
+func parse_float(raw) = types.to_float(remove_underscores(raw, 0, len(raw), "")) !? {
+    success(v) => v
+    failure(e) => 0.0
+};
 
 func parse_int_clean(s) = match string.starts_with(s, "0x") || string.starts_with(s, "0X")
     true => parse_radix(string.substring_from(s, 2), 16, 0, 0)
@@ -373,6 +529,11 @@ func capture(st, name) = match find_local(st.free, name, 0, len(st.free))
 
 func compile_global(st, name) = match find_global(st.globals, name, 0, len(st.globals))
     Maybe.Some(index) => {e: ast.EWild, st: emit(st, bytecode.ins_u16(bytecode.get_global(), index))}
+    Maybe.None => compile_builtin_value(st, name);
+
+// A builtin used as a value rather than called: `Function(len)`.
+func compile_builtin_value(st, name) = match builtin_index(ast.EIdent(name))
+    Maybe.Some(index) => {e: ast.EWild, st: emit(st, bytecode.ins_u8(bytecode.builtin(), index))}
     Maybe.None => {e: ast.EWild, st: st};
 
 func find_local(locals, name, i, n) = match i >= n
@@ -383,7 +544,25 @@ func find_local_1(locals, name, i, n) = match locals[i].name == name
     true => Maybe.Some(locals[i].index)
     false => find_local(locals, name, i + 1, n);
 
-func compile_member(st, object, property) = do
+// `Maybe.Some` and `Maybe.None` are built-in constructors, not module members:
+// Some is a function that emits OpConstructMaybeSome, None is a constant.
+func compile_member(st, object, property) = match is_maybe(object)
+    true => compile_maybe_member(st, property)
+    false => compile_member_access(st, object, property);
+
+func is_maybe(object) = match object
+    Expr.EIdent(name) => name == "Maybe"
+    _ => false;
+
+func compile_maybe_member(st, property) = match property
+    "None" => compile_const(st, serialize.CAdt("Maybe", "Maybe.None", []))
+    "Some" => compile_const(st, serialize.CFunc(maybe_some_record()))
+    _ => compile_member_access(st, ast.EIdent("Maybe"), property);
+
+func maybe_some_record() = serialize.FunctionRecord("Some", "entry", ["value"], 1, false,
+    concat_arr(bytecode.ins(bytecode.construct_maybe_some()), bytecode.ins(bytecode.ret())));
+
+func compile_member_access(st, object, property) = do
     obj = compile_expr(st, object);
     added = add_constant(obj.st, serialize.CStr(property));
     {e: ast.EWild, st: emit(added.st, bytecode.ins_u16(bytecode.get_member(), added.index))}
@@ -404,11 +583,22 @@ func compile_args(st, args, i, n) = match i >= n
 // for it at sp-1-numArgs.
 func compile_pipe(st, left, right) = match right
     Expr.ECall(fn, args) => compile_pipe_call(st, left, fn, args)
+    Expr.EConstraintCheck(target) => compile_pipe_constraint(st, left, target)
     _ => do
         r = compile_callee(st, right);
         l = compile_expr(r.st, left);
         {e: ast.EWild, st: emit(l.st, bytecode.ins_u8(bytecode.call(), 1))}
     end;
+
+// `value |> Constraint?` pushes the value, the constraint, the value again, calls
+// the constraint and wraps the result in success/failure.
+func compile_pipe_constraint(st, left, target) = do
+    s1 = compile_expr_strict(st, left);
+    s2 = compile_callee(s1, target).st;
+    s3 = compile_expr_strict(s2, left);
+    s4 = emit(s3, bytecode.ins_u8(bytecode.call(), 1));
+    {e: ast.EWild, st: emit(s4, bytecode.ins(bytecode.check_constraint()))}
+end;
 
 func compile_pipe_call(st, left, fn, args) = do
     f = compile_callee(st, fn);
@@ -432,6 +622,66 @@ func compile_array(st, elements, is_concat) = do
         true => bytecode.array_concat()
         false => bytecode.array();
     {e: ast.EWild, st: emit(s1, bytecode.ins_u16(op, len(elements)))}
+end;
+
+// async.stay(name: value, ...) { body }: push the initial state as key/value
+// pairs, OpStayBegin, the body statements, then OpStayEnd.
+func compile_stay(st, state_init, body) = do
+    s1 = push_state(st, state_init, 0, len(state_init));
+    s2 = emit(s1, bytecode.ins_u16(bytecode.stay_begin(), len(state_init)));
+    s3 = compile_statements(s2, body, 0, len(body));
+    {e: ast.EWild, st: emit(s3, bytecode.ins(bytecode.stay_end()))}
+end;
+
+func push_state(st, pairs, i, n) = match i >= n
+    true => st
+    false => push_state(push_state_pair(st, pairs[i]), pairs, i + 1, n);
+
+func push_state_pair(st, pair) = match pair
+    StatePair.StatePair(name, value) => do
+        added = add_constant(st, serialize.CStr(name));
+        s1 = emit(added.st, bytecode.ins_u16(bytecode.constant(), added.index));
+        compile_expr_strict(s1, value)
+    end
+    _ => st;
+
+// `subject !? { success(v) => ... failure(e) => ... }`
+func compile_handler(st, subject, sv, sb, fv, fb) = do
+    s0 = compile_expr_strict(st, subject);
+    s1 = emit(s0, bytecode.ins(bytecode.dup()));
+    s2 = emit(s1, bytecode.ins(bytecode.is_success()));
+    jump_fail = len(s2.code);
+    s3 = emit(s2, bytecode.ins_u16(bytecode.jump_if_false(), 0));
+    s4 = emit(s3, bytecode.ins(bytecode.unwrap()));
+    s5 = bind_handler_var(s4, sv);
+    s6 = emit(s5, bytecode.ins(bytecode.pop()));
+    s7 = compile_expr_strict(s6, sb);
+    jump_end = len(s7.code);
+    s8 = emit(s7, bytecode.ins_u16(bytecode.jump(), 0));
+    s9 = patch_u16(s8, jump_fail, len(s8.code));
+    s10 = emit(s9, bytecode.ins(bytecode.unwrap()));
+    s11 = bind_handler_var(s10, fv);
+    s12 = emit(s11, bytecode.ins(bytecode.pop()));
+    s13 = compile_expr_strict(s12, fb);
+    {e: ast.EWild, st: patch_u16(s13, jump_end, len(s13.code))}
+end;
+
+// The handler variable is stored and immediately read back, which is what the
+// reference emits (the body then pops it).
+func bind_handler_var(st, name) = match st.in_fn
+    true => bind_local_read(st, name)
+    false => bind_global_read(st, name);
+
+func bind_local_read(st, name) = do
+    st2 = define_local(st, name);
+    s1 = emit(st2, bytecode.ins_u8(bytecode.set_local(), st2.nlocals - 1));
+    emit(s1, bytecode.ins_u8(bytecode.get_local(), st2.nlocals - 1))
+end;
+
+func bind_global_read(st, name) = do
+    defined = define_global(st, name);
+    s1 = emit(defined.st, bytecode.ins_u16(bytecode.set_global(), defined.index));
+    emit(s1, bytecode.ins_u16(bytecode.get_global(), defined.index))
 end;
 
 func compile_index(st, left, index) = do
@@ -542,6 +792,27 @@ func builtin_of(name) = match name
     "values" => Maybe.Some(13)
     "hash_set" => Maybe.Some(14)
     "hash_merge" => Maybe.Some(15)
+    // Built-in type constraint checkers, then the common constraints: the order
+    // is the compiler's builtin list, which is the order the VM registers.
+    "Int" => Maybe.Some(16)
+    "Float" => Maybe.Some(17)
+    "String" => Maybe.Some(18)
+    "Bool" => Maybe.Some(19)
+    "Array" => Maybe.Some(20)
+    "Hash" => Maybe.Some(21)
+    "Tuple" => Maybe.Some(22)
+    "Function" => Maybe.Some(23)
+    "Number" => Maybe.Some(24)
+    "NonZero" => Maybe.Some(25)
+    "Positive" => Maybe.Some(26)
+    "NonNegative" => Maybe.Some(27)
+    "Natural" => Maybe.Some(28)
+    "Finite" => Maybe.Some(29)
+    "NonEmpty" => Maybe.Some(30)
+    "Empty" => Maybe.Some(31)
+    "Digits" => Maybe.Some(32)
+    "Lowercase" => Maybe.Some(33)
+    "Uppercase" => Maybe.Some(34)
     _ => Maybe.None;
 
 // `&&` and `||` short-circuit, so they need jumps rather than an opcode pair.
@@ -653,9 +924,11 @@ func case_default(c) = match c
 
 func begin_fail(st, c, last) = match last && !case_default(c)
     true => do
+        skip_pos = len(st.code);
         skip = emit(st, bytecode.ins_u16(bytecode.jump(), 0));
         pos = len(skip.code);
-        with_fail(emit(skip, bytecode.ins(bytecode.match_fail())), pos)
+        emitted = emit(skip, bytecode.ins(bytecode.match_fail()));
+        with_fail(patch_u16(emitted, skip_pos, len(emitted.code)), pos)
     end
     false => with_fail(st, -1);
 

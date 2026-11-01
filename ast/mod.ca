@@ -69,7 +69,7 @@ type Stmt =
     SAssign(name, value) |
     SArrayDestr(names, value) |
     SHeadTailDestr(head, tail, value) |
-    SFunc(name, params, constraints, body, is_effect) |
+    SFunc(name, params, constraints, param_types, return_constraint, body, is_effect) |
     SConstraint(name, params, body) |
     SType(name, variants) |
     SExpr(expression);

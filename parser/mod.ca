@@ -183,23 +183,27 @@ func parse_func_decl(toks, is_effect) = do
     name = lit(rest(toks))
     open = rest(rest(toks))
     params = parse_params(open)
-    body_start = expect(skip_return_annotation(params.t), "=")
+    annotated = parse_return_annotation(params.t)
+    body_start = expect(annotated.t, "=")
     r = parse_expression(body_start, 1)
     after = eat_semicolon(r.t)
-    {s: ast.SFunc(name, params.names, params.constraints, r.e, is_effect), t: after}
+    {s: ast.SFunc(name, params.names, params.constraints, params.types, annotated.c, r.e, is_effect), t: after}
 end;
 
-// A return annotation (`: Int`, `: Positive`, `: A & B`) is accepted and
-// dropped: the reference formatter does not print it either.
-func skip_return_annotation(toks) = match is_kind(toks, ":")
-    true => skip_annotation(rest(toks))
-    false => toks;
+// A return annotation (`: Int`, `: Positive`, `: A & B`). The formatter does not
+// print it, but the compiler needs a constraint name for the return check; a
+// built-in type name is not a constraint and is dropped.
+func parse_return_annotation(toks) = match is_kind(toks, ":")
+    true => parse_return_annotation_name(rest(toks))
+    false => {c: "", t: toks};
 
-func skip_annotation(toks) = do
-    after_name = skip_question(rest(toks))
-    match is_kind(after_name, "&") || is_kind(after_name, "|")
-        true => skip_annotation(rest(after_name))
-        false => after_name
+func parse_return_annotation_name(toks) = do
+    first = lit(toks)
+    parts = parse_composite(rest(toks), first, false)
+    after = skip_question(parts.t)
+    // A return annotation is kept even when it is a built-in type name: the
+    // compiler enforces it as a constraint and skips names it cannot resolve.
+    {c: parts.text, t: after}
 end;
 
 func skip_question(toks) = match is_kind(toks, "?")
@@ -207,22 +211,22 @@ func skip_question(toks) = match is_kind(toks, "?")
     false => toks;
 
 // parse_params reads `(a, b: C?, c)`.
-func parse_params(toks) = parse_params_from(rest(toks), [], []);
+func parse_params(toks) = parse_params_from(rest(toks), [], [], []);
 
-func parse_params_from(toks, names, constraints) = match is_kind(toks, ")") || at_end(toks)
-    true => {names: names, constraints: constraints, t: rest(toks)}
-    false => parse_params_one(toks, names, constraints);
+func parse_params_from(toks, names, constraints, types) = match is_kind(toks, ")") || at_end(toks)
+    true => {names: names, constraints: constraints, types: types, t: rest(toks)}
+    false => parse_params_one(toks, names, constraints, types);
 
-func parse_params_one(toks, names, constraints) = do
+func parse_params_one(toks, names, constraints, types) = do
     name = lit(toks)
-    after_name = rest(toks)
-    parsed = parse_param_constraint(after_name)
+    parsed = parse_annotation(rest(toks))
     names2 = push(names, name)
     cons2 = push(constraints, parsed.c)
+    types2 = push(types, parsed.ty)
     next = match is_kind(parsed.t, ",")
         true => rest(parsed.t)
         false => parsed.t
-    parse_params_from(next, names2, cons2)
+    parse_params_from(next, names2, cons2, types2)
 end;
 
 // A parameter annotation is either a built-in type or a constraint. The
@@ -234,15 +238,29 @@ func parse_param_constraint(toks) = match is_kind(toks, ":")
     true => parse_annotation(rest(toks))
     false => {c: "", t: toks};
 
-func parse_annotation(toks) = do
+// parse_annotation distinguishes a built-in type annotation (`a: Int`, kept in
+// `ty`) from a constraint (`a: Positive?`, kept in `c`). The formatter prints
+// only constraints, but the compiler enforces both at run time.
+// parse_annotation returns the cursor unchanged when there is no `:`, so a
+// parameter without an annotation does not consume the delimiter.
+func parse_annotation(toks) = match is_kind(toks, ":")
+    true => parse_annotation_body(rest(toks))
+    false => {c: "", ty: "", t: toks};
+
+func parse_annotation_body(toks) = do
     first = lit(toks)
     parts = parse_composite(rest(toks), first, false)
     has_q = is_kind(parts.t, "?")
     after = match has_q
         true => rest(parts.t)
         false => parts.t
-    {c: annotation_text(first, parts.text, parts.composite, has_q), t: after}
+    {c: annotation_text(first, parts.text, parts.composite, has_q),
+     ty: annotation_type(first, parts.composite, has_q), t: after}
 end;
+
+func annotation_type(first, composite, has_q) = match !composite && !has_q && is_builtin_type(first)
+    true => first
+    false => "";
 
 // parse_composite accumulates `A & B` / `A | B` into one textual annotation.
 func parse_composite(toks, text, composite) = match is_kind(toks, "&") || is_kind(toks, "|")

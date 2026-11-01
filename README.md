@@ -2,9 +2,9 @@
 
 A from-scratch reimplementation of the Calcium toolchain in Calcium itself.
 
-**Status: front end implemented.** The lexer's token stream and the
-formatter's output both match the reference byte for byte over the differential
-corpus. See `SPEC.md` for the stage plan.
+**Status: compiler implemented.** The lexer's token stream and the formatter's
+output match the reference byte for byte, and the compiler's output behaves
+identically on every comparable corpus file. See `SPEC.md` for the stage plan.
 
 The Go implementation in [`calcium-lang`](https://github.com/ytnobody/calcium-lang)
 is the **reference implementation** and the source of truth for the language
@@ -33,6 +33,7 @@ drift.
 | formatter | SH-2 |
 | linter | SH-3 |
 | bytecode VM | SH-4 (stretch) |
+| compiler emitting `.bone` | SH-3, done for the corpus |
 
 Out of scope, permanently: the 74 `__` primitives and the OS/library facilities
 they wrap. Those are the native boundary and cannot be written in Calcium.

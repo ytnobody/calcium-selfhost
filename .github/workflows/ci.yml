@@ -51,7 +51,7 @@ jobs:
         env:
           ORACLE: ${{ runner.temp }}/oracle/calcium
           CALCIUM_LANG: ${{ github.workspace }}/oracle-src
-          # Flip to '1' once the first stage (formatter) is implemented, so that
-          # a silently-skipped stage cannot keep CI green.
-          STRICT: '0'
+          # All three stages are implemented, so a skipped stage must fail the
+          # build rather than keep CI green.
+          STRICT: '1'
         run: bash selfhost/tests/differential.sh

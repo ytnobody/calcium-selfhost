@@ -54,7 +54,7 @@ func format_statement(stmt, d) = match stmt
     Stmt.SAssign(name, value) => concat(indent(d), name, " = ", expr(value, d), ";\n")
     Stmt.SArrayDestr(names, value) => concat(indent(d), "[", string.join(names, ", "), "] = ", expr(value, d), ";\n")
     Stmt.SHeadTailDestr(head, tail, value) => concat(indent(d), "[", head, " | ", tail, "] = ", expr(value, d), ";\n")
-    Stmt.SFunc(name, params, constraints, body, is_effect) => function_decl(name, params, constraints, body, is_effect, d)
+    Stmt.SFunc(name, params, constraints, param_types, return_constraint, body, is_effect) => function_decl(name, params, constraints, body, is_effect, d)
     Stmt.SConstraint(name, params, body) => concat(indent(d), "constraint ", name, "(", string.join(params, ", "), ") = ", expr(body, d), ";\n")
     Stmt.SType(name, variants) => type_decl(name, variants, d)
     Stmt.SExpr(e) => concat(indent(d), expr(e, d), ";\n")

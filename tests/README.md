@@ -19,6 +19,11 @@ ORACLE=/tmp/calcium CALCIUM_LANG=../calcium-lang bash tests/differential.sh
 | formatter | `calcium fmt` output, on a copy of each corpus file | byte-identical |
 | compiler | compile with the candidate, run the result on the reference VM | same stdout, same exit status |
 
+The compiler stage runs both sides from the corpus root, because the reference
+resolves local modules relative to the working directory when it runs a `.bone`,
+and skips corpus files the reference itself rejects or cannot compare (see the
+`compile_excluded` list and the comments there).
+
 The compiler comparison deliberately does **not** compare bytecode. Optimisation
 passes are unspecified (`calcium-lang/specs/bone-format.md` §6), so two correct
 compilers may emit different instruction streams. Only behaviour is contractual

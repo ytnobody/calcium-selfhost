@@ -32,7 +32,14 @@ SH-2 progress:
 - **parser + formatter done for the corpus** — formatted output is byte-identical
   to `calcium fmt` on all 47 corpus files and 9 files from the dependent
   repositories.
-- **type checker** — not started.
+- **type checker** — not started; see D13.
+
+SH-3 progress: the compiler emits .bone that behaves like the reference on every
+comparable corpus file (100 comparisons pass). Three files are excluded: two
+because the reference itself cannot be compared (async_spawn is
+non-deterministic; constraint.ca expects a static-constraint error) and one
+because the reference's own top-level compiler does not see the `__`
+primitives, so its stdlib sources fail to compile when run directly.
 
 Known grammar gaps, not exercised by the corpus: `Secret.with(cap) { ... }`
 blocks are not parsed (they degrade to wildcards), and no test covers a match

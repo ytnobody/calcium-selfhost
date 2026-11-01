@@ -207,3 +207,22 @@ risk the frame limit.
 
 Verified: 12 KB, 62 KB and 125 KB inputs lex in 0.16 s, 0.75 s and 1.44 s
 (linear), all byte-identical to the reference.
+
+## D13 — The type checker is deferred (open, no blocker)
+
+`typechecker` (303 Go lines) reports gradual-type mismatches through
+`calcium lint`. Across the whole corpus it produces **zero findings**
+(`static` 135, `parse` 5, `type` 0), so a differential test cannot distinguish a
+correct implementation from an empty one, and its messages are explicitly not
+contractual (`SPEC.md` §3).
+
+Implementing it would also require keeping type annotations on the AST, which the
+parser currently drops for the formatter's benefit.
+
+Decision: deferred. If it is taken up, it needs its own fixture corpus of small
+programs with deliberate mismatches plus a reference command that dumps
+findings as `line:column rule` (position and rule only, not message text).
+
+SH-3 note: `constraint.ca` is excluded from the compile stage for the adjacent
+reason — the reference rejects it with a static-constraint error, and that
+checker is the piece that is not implemented.
