@@ -64,7 +64,8 @@ func with_errors_list(st, errors) = {
 func with_fresh_locals(st, params) = {
     code: [], consts: st.consts, globals: st.globals, nglobals: st.nglobals,
     locals: params_locals(params, 0, len(params), []), nlocals: len(params),
-    free: [], outer_locals: st.locals, outer_free: st.free, in_fn: true
+    free: [], outer_locals: st.locals, outer_free: st.free, in_fn: true,
+    errors: st.errors
 };
 
 // with_lambda starts a closure's own instruction stream. Constants stay shared
@@ -72,7 +73,8 @@ func with_fresh_locals(st, params) = {
 func with_lambda(st, params) = {
     code: [], consts: st.consts, globals: st.globals, nglobals: st.nglobals,
     locals: params_locals(params, 0, len(params), []), nlocals: len(params),
-    free: [], outer_locals: st.locals, outer_free: st.free, in_fn: true
+    free: [], outer_locals: st.locals, outer_free: st.free, in_fn: true,
+    errors: st.errors
 };
 
 func with_free(st, free) = rebuild(st, st.code, st.consts, st.globals, st.nglobals,
