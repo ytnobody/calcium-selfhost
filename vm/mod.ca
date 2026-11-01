@@ -734,8 +734,10 @@ func op_load_module(st, ip) = do
     done(advance(push_value(st, module_value(st, path)), ip))
 end;
 
+// The two-argument `get` yields a Maybe, so the three-argument form is used to
+// read the export table directly.
 func module_value(st, path) = match has(st.modules, path)
-    true => get(st.modules, path)
+    true => get(st.modules, path, {})
     false => {"__module": path};
 
 func op_builtin(st, ip, index) = done(advance(push_value(st, BuiltinFn(index)), ip));
