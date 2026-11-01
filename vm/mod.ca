@@ -747,34 +747,33 @@ func op_wrap(st, ip, ok) = do
     done(advance(push_value(r.st, wrap_value(r.v, ok)), ip))
 end;
 
-// Result values are represented with the interpreter's own ADT rather than
-// Calcium's `success`/`failure`: those are keywords, so their payload cannot be
-// destructured with a constructor pattern.
+// Result values are Calcium's own `success`/`failure`: a host function can return
+// one, and a program's `!?` handler must see it. They cannot be destructured with
+// a constructor pattern (keywords), so the tests go through core.types and the
+// payload is extracted with `!?`.
 func wrap_value(v, ok) = match ok
-    true => AdtVal("Result", "success", [v])
-    false => AdtVal("Result", "failure", [v]);
+    true => success(v)
+    false => failure(v);
 
 func op_is_wrapped(st, ip, want_success) = do
     r = pop_value(st);
     done(advance(push_value(r.st, is_wrapped(r.v, want_success)), ip))
 end;
 
-func is_wrapped(v, want_success) = match v
-    AdtVal(type_name, tag, items) => result_tag(tag, want_success)
-    _ => false;
-
-func result_tag(tag, want_success) = match want_success
-    true => tag == "success"
-    false => tag == "failure";
+// `core.types` has no Result predicates, but `type_of` names the value's type.
+func is_wrapped(v, want_success) = match want_success
+    true => types.type_of(v) == "success"
+    false => types.type_of(v) == "failure";
 
 func op_unwrap(st, ip) = do
     r = pop_value(st);
     done(advance(push_value(r.st, unwrapped(r.v)), ip))
 end;
 
-func unwrapped(v) = match v
-    AdtVal(type_name, tag, items) => items[0]
-    _ => v;
+func unwrapped(v) = v !? {
+    success(x) => x
+    failure(e) => e
+};
 
 // ---------------------------------------------------------------------------
 // Builtin calls
@@ -1075,10 +1074,8 @@ func! host_apply(name, args) = match name
     "core.types:is_bool" => host_ok(call_n(types.is_bool, args))
     "core.types:is_array" => host_ok(call_n(types.is_array, args))
     "core.types:is_hash" => host_ok(call_n(types.is_hash, args))
-    "core.types:is_tuple" => host_ok(call_n(types.is_tuple, args))
     "core.types:is_function" => host_ok(call_n(types.is_function, args))
     "core.types:is_number" => host_ok(call_n(types.is_number, args))
-    "core.types:is_success" => host_ok(call_n(types.is_success, args))
     "core.regex:matches" => host_ok(call_n(regex.matches, args))
     "core.regex:find" => host_ok(call_n(regex.find, args))
     "core.regex:find_all" => host_ok(call_n(regex.find_all, args))
@@ -1091,7 +1088,6 @@ func! host_apply(name, args) = match name
     "core.regex:is_match" => host_ok(call_n(regex.is_match, args))
     "core.regex:extract" => host_ok(call_n(regex.extract, args))
     "core.regex:escape" => host_ok(call_n(regex.escape, args))
-    "core.types:is_failure" => host_ok(call_n(types.is_failure, args))
     _ => host_err(concat("unsupported host function: ", name));
 
 func! host_say(args) = do
