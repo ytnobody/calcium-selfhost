@@ -153,11 +153,13 @@ func parse_namespace(toks) = do
     {s: ast.SNamespace(path.text), t: after}
 end;
 
-// module_path reads `ident (. ident)*` and returns its dotted text.
-func module_path(toks) = module_path_more(toks, lit(toks), rest(toks));
+// module_path reads `ident (. ident)*` and returns its dotted text. The cursor
+// it returns must be the token *after* the path; returning the first token made
+// `namespace bytes;` parse as two statements.
+func module_path(toks) = module_path_more(lit(toks), rest(toks));
 
-func module_path_more(toks, text, after) = match is_kind(after, ".")
-    true => module_path_more(rest(rest(after)), concat(text, ".", lit(rest(after))), rest(rest(after)))
+func module_path_more(text, toks) = match is_kind(toks, ".")
+    true => module_path_more(concat(text, ".", lit(rest(toks))), rest(rest(toks)))
     false => {text: text, t: toks};
 
 func parse_assignment(toks) = do
@@ -181,11 +183,28 @@ func parse_func_decl(toks, is_effect) = do
     name = lit(rest(toks))
     open = rest(rest(toks))
     params = parse_params(open)
-    body_start = expect(rest(params.t), "=")
+    body_start = expect(skip_return_annotation(params.t), "=")
     r = parse_expression(body_start, 1)
     after = eat_semicolon(r.t)
     {s: ast.SFunc(name, params.names, params.constraints, r.e, is_effect), t: after}
 end;
+
+// A return annotation (`: Int`, `: Positive`, `: A & B`) is accepted and
+// dropped: the reference formatter does not print it either.
+func skip_return_annotation(toks) = match is_kind(toks, ":")
+    true => skip_annotation(rest(toks))
+    false => toks;
+
+func skip_annotation(toks) = do
+    after_name = skip_question(rest(toks))
+    match is_kind(after_name, "&") || is_kind(after_name, "|")
+        true => skip_annotation(rest(after_name))
+        false => after_name
+end;
+
+func skip_question(toks) = match is_kind(toks, "?")
+    true => rest(toks)
+    false => toks;
 
 // parse_params reads `(a, b: C?, c)`.
 func parse_params(toks) = parse_params_from(rest(toks), [], []);
@@ -206,28 +225,50 @@ func parse_params_one(toks, names, constraints) = do
     parse_params_from(next, names2, cons2)
 end;
 
-// A parameter constraint is written `: Constraint` or `: Constraint?`. Composite
-// annotations (`A & B`, `A | B`) are read as a single textual constraint.
+// A parameter annotation is either a built-in type or a constraint. The
+// reference formatter drops type annotations (`a: Int` prints as `a`) but keeps
+// constraints, always with a `?` (`a: Positive` prints as `a: Positive?`). A
+// built-in type followed by `?` is treated as a constraint instead, matching the
+// reference.
 func parse_param_constraint(toks) = match is_kind(toks, ":")
-    true => parse_constraint_name(rest(toks))
+    true => parse_annotation(rest(toks))
     false => {c: "", t: toks};
 
-func parse_constraint_name(toks) = do
+func parse_annotation(toks) = do
     first = lit(toks)
-    after = rest(toks)
-    more = parse_constraint_more(after, first)
-    name = match more.t
-        _ => more.text
-    {c: name, t: more.t}
+    parts = parse_composite(rest(toks), first, false)
+    has_q = is_kind(parts.t, "?")
+    after = match has_q
+        true => rest(parts.t)
+        false => parts.t
+    {c: annotation_text(first, parts.text, parts.composite, has_q), t: after}
 end;
 
-func parse_constraint_more(toks, text) = match is_kind(toks, "&") || is_kind(toks, "|")
-    true => parse_constraint_more(rest(rest(toks)), concat(text, " ", lit(toks), " ", lit(rest(toks))))
-    false => {text: text, t: parse_constraint_question(toks)};
+// parse_composite accumulates `A & B` / `A | B` into one textual annotation.
+func parse_composite(toks, text, composite) = match is_kind(toks, "&") || is_kind(toks, "|")
+    true => parse_composite(rest(rest(toks)), concat(text, " ", lit(toks), " ", lit(rest(toks))), true)
+    false => {text: text, composite: composite, t: toks};
 
-func parse_constraint_question(toks) = match is_kind(toks, "?")
-    true => rest(toks)
-    false => toks;
+func annotation_text(first, text, composite, has_q) = match !composite && !has_q && is_builtin_type(first)
+    true => ""
+    false => text;
+
+func is_builtin_type(name) = match name
+    "Any" => true
+    "Maybe" => true
+    "Secret" => true
+    "Bool" => true
+    "Int" => true
+    "Float" => true
+    "String" => true
+    "Array" => true
+    "Hash" => true
+    "Tuple" => true
+    "Func" => true
+    "Regex" => true
+    "Success" => true
+    "Failure" => true
+    _ => false;
 
 func parse_type_decl(toks) = do
     name = lit(rest(toks))
@@ -272,7 +313,7 @@ end;
 
 func parse_constraint_decl(toks) = do
     name = lit(rest(toks))
-    params = parse_constraint_params(rest(rest(toks)), [])
+    params = parse_constraint_params(rest(rest(rest(toks))), [])
     body_start = expect(params.t, "=")
     r = parse_expression(body_start, 1)
     after = eat_semicolon(r.t)
@@ -362,7 +403,17 @@ func parse_infix_op(left, toks, min_prec) = do
     parse_infix(r.e, r.t, min_prec)
 end;
 
-func parse_prefix(toks) = match kind(toks)
+func parse_prefix(toks) = match is_stay(toks)
+    true => parse_stay(toks)
+    false => parse_prefix_rest(toks);
+
+// async.stay(name: value, ...) { ... } is its own construct, not a call with a
+// trailing block: its "arguments" are name/value pairs, so the ordinary call
+// parser would choke on the colon.
+func is_stay(toks) = kind(toks) == "IDENT" && lit(toks) == "async" &&
+    peek_kind(toks) == "." && lit(rest(rest(toks))) == "stay" && peek3_kind(toks) == "(";
+
+func parse_prefix_rest(toks) = match kind(toks)
     "INT" => res(ast.EInt(lit(toks)), rest(toks))
     "FLOAT" => res(ast.EFloat(lit(toks)), rest(toks))
     "STRING" => res(ast.EStr(lit(toks)), rest(toks))
@@ -417,11 +468,26 @@ func parse_return(toks) = do
     res(ast.EReturn(r.e), r.t)
 end;
 
+// `()` is only meaningful as an empty parameter list, so `() => body` is the one
+// form that starts this way.
+func parse_group(toks) = match is_kind(rest(toks), ")")
+    true => parse_empty_group(toks)
+    false => parse_group_nonempty(toks);
+
+func parse_empty_group(toks) = match peek2_kind(toks) == "=>"
+    true => parse_empty_lambda(rest(rest(rest(toks))))
+    false => res(ast.ETuple([]), rest(rest(toks)));
+
+func parse_empty_lambda(toks) = do
+    r = parse_expression(toks, 1)
+    res(ast.ELambda([], r.e), r.t)
+end;
+
 // `(expr)`, `(a, b)` or `(a, b) => body`.
-func parse_group(toks) = do
+func parse_group_nonempty(toks) = do
     r = parse_expression(rest(toks), 1)
     match is_kind(r.t, ")") && peek_is(r.t, "=>")
-        true => parse_lambda_body(r.e, rest(r.t))
+        true => parse_lambda_body(r.e, rest(rest(r.t)))
         false => parse_group_rest(r)
 end;
 
@@ -496,7 +562,7 @@ func parse_hash_pair(toks, acc) = do
 end;
 
 func parse_hash_key(toks) = match kind(toks) == "IDENT" && peek_kind(toks) == ":"
-    true => res(ast.EIdent(lit(toks)), rest(toks))
+    true => res(ast.EStr(lit(toks)), rest(toks))
     false => parse_expression(toks, 1);
 
 // `"a ${expr} b"`
@@ -623,6 +689,10 @@ func parse_infix_for(left, toks, min_prec) = match kind(toks)
     "!>" => effect_pipe(left, toks, false)
     "!!!>" => effect_pipe(left, toks, true)
     "|>?" => error_pipe_binary(left, toks)
+    "<" => relational(left, toks)
+    ">" => relational(left, toks)
+    "<=" => relational(left, toks)
+    ">=" => relational(left, toks)
     "..." => res(ast.ESpread(left), rest(toks))
     "?" => res(ast.EConstraintCheck(left), rest(toks))
     "!?" => parse_effect_handle(left, rest(toks))
@@ -649,6 +719,25 @@ func infix_binary(left, toks) = do
     r = parse_expression(rest(toks), right_prec(prec(op), op))
     res(ast.EInfix(op, left, r.e), r.t)
 end;
+
+// A chained comparison `a <= b <= c` is expanded to `(a <= b) && (b <= c)`,
+// which is what the reference parser does; `==` and `!=` do not chain.
+func relational(left, toks) = do
+    op = lit(toks)
+    r = parse_expression(rest(toks), prec(op))
+    chain(ast.EInfix(op, left, r.e), r.e, r.t)
+end;
+
+func chain(combined, middle, toks) = match is_comparison(kind(toks))
+    true => do
+        op = lit(toks)
+        r = parse_expression(rest(toks), prec(op))
+        right = ast.EInfix(op, middle, r.e)
+        chain(ast.EInfix("&&", combined, right), r.e, r.t)
+    end
+    false => res(combined, toks);
+
+func is_comparison(k) = k == "<" || k == ">" || k == "<=" || k == ">=";
 
 func pipe_binary(left, toks) = do
     r = parse_expression(rest(toks), 3)
@@ -679,11 +768,43 @@ func parse_effect_handle(subject, toks) = do
 end;
 
 func parse_handler_case(toks) = do
-    name = lit(rest(toks))
-    arrow = expect(rest(rest(rest(toks))), "=>")
+    name = lit(rest(rest(toks)))
+    after_close = expect(rest(rest(rest(toks))), ")")
+    arrow = expect(after_close, "=>")
     body = parse_expression(arrow, 2)
     {name: name, body: body.e, t: body.t}
 end;
+
+func parse_stay(toks) = do
+    open = rest(rest(rest(toks)))
+    init = parse_state_pairs(rest(open), [])
+    body_open = expect(init.t, "{")
+    body = parse_block_statements(body_open, [])
+    res(ast.EStay(init.pairs, body.ss), body.t)
+end;
+
+func parse_state_pairs(toks, acc) = match is_kind(toks, ")") || at_end(toks)
+    true => {pairs: acc, t: rest(toks)}
+    false => parse_state_pair(toks, acc);
+
+func parse_state_pair(toks, acc) = do
+    name = lit(toks)
+    colon = expect(rest(toks), ":")
+    value = parse_expression(colon, 1)
+    acc2 = push(acc, ast.StatePair(name, value.e))
+    next = match is_kind(value.t, ",")
+        true => rest(value.t)
+        false => value.t
+    parse_state_pairs(next, acc2)
+end;
+
+// parse_block_statements collects statements up to a closing brace.
+func parse_block_statements(toks, acc) = match is_kind(toks, "}") || at_end(toks)
+    true => {ss: acc, t: rest(toks)}
+    false => do
+        r = parse_statement(toks)
+        parse_block_statements(r.t, push(acc, r.s))
+    end;
 
 // `do ... end`
 //

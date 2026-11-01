@@ -209,11 +209,15 @@ func lambda_text(params, body, d) = match len(params) == 1
     false => concat("(", string.join(params, ", "), ") => ", expr(body, d));
 
 // match_text renders `match subject` and its arms one per line, one level in.
-func match_text(subject, cases, d) = concat("match ", expr(subject, d), case_lines(cases, d + 1, 0, len(cases), ""));
+//
+// The arm *bodies* are rendered at the outer depth, not the arm depth: the
+// reference does not increment its depth for them, which is why a match nested
+// in an arm body aligns with its parent's arms rather than indenting further.
+func match_text(subject, cases, d) = concat("match ", expr(subject, d), case_lines(cases, d + 1, d, 0, len(cases), ""));
 
-func case_lines(cases, d, i, n, acc) = match i >= n
+func case_lines(cases, arm_d, body_d, i, n, acc) = match i >= n
     true => acc
-    false => case_lines(cases, d, i + 1, n, concat(acc, "\n", indent(d), case_text(cases[i], d)));
+    false => case_lines(cases, arm_d, body_d, i + 1, n, concat(acc, "\n", indent(arm_d), case_text(cases[i], body_d)));
 
 func case_text(c, d) = match c
     Case.Case(pattern, guard, body, is_default) => case_body(pattern, guard, body, is_default, d)
@@ -240,8 +244,8 @@ end;
 
 func effect_handle(subject, sv, sb, fv, fb, d) = concat(
     expr(subject, d), " !? {\n",
-    indent(d + 1), "success(", sv, ") => ", expr(sb, d + 1), "\n",
-    indent(d + 1), "failure(", fv, ") => ", expr(fb, d + 1), "\n",
+    indent(d + 1), "success(", sv, ") => ", expr(sb, d), "\n",
+    indent(d + 1), "failure(", fv, ") => ", expr(fb, d), "\n",
     indent(d), "}");
 
 // do_text renders `do`, the statements, the final expression, then `end`.
