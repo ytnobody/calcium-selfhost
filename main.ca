@@ -9,6 +9,7 @@ use compiler;
 use serialize;
 use typechecker;
 use vm;
+use loader;
 
 // calcium-selfhost CLI entry point.
 //
@@ -162,82 +163,22 @@ func! run_file(path) = do
     st = compiler.compile_program(parsed.statements)
     match len(st.errors) == 0
         true => do
-            mods = load_local_modules(use_paths(parsed.statements, 0, len(parsed.statements), []),
-                0, len(use_paths(parsed.statements, 0, len(parsed.statements), [])), dir_of(path), {});
+            mods = loader.load_modules(parsed.statements, path);
             vm.run_with_modules(st.consts, st.code, mods)
         end
         false => report_compile_errors(path, st.errors, 0, len(st.errors))
 end;
 
-// use_paths collects the module paths a program imports.
-func use_paths(ss, i, n, acc) = match i >= n
-    true => acc
-    false => use_paths(ss, i + 1, n, add_use_path(ss[i], acc));
 
-func add_use_path(stmt, acc) = match stmt
-    Stmt.SUse(path, is_effect) => match is_core_path(path)
-        true => acc
-        false => push(acc, path)
-    _ => acc;
 
-func is_core_path(path) = string.starts_with(path, "core.");
+func check_print(findings, i, n) = match i >= n
+    true => 0
+    false => check_print_one(findings, i, n);
 
-// dir_of keeps the leading empty component of an absolute path: joining from the
-// front preserves the first "/" that splitting produced.
-func dir_of(path) = do
-    parts = string.split(path, "/");
-    dir_of_prefix(parts, 0, len(parts) - 1, "")
+func check_print_one(findings, i, n) = do
+    concat(to_string(findings[i].line), ":", to_string(findings[i].col), "\ttype") !> io.say
+    check_print(findings, i + 1, n)
 end;
-
-func dir_of_prefix(parts, i, n, acc) = match i >= n
-    true => match acc == ""
-        true => "."
-        false => acc
-    false => dir_of_prefix(parts, i + 1, n, append_part(acc, parts[i], i));
-
-func append_part(acc, part, i) = match i == 0
-    true => part
-    false => concat(acc, "/", part);
-
-func load_local_modules(paths, i, n, source_dir, mods) = match i >= n
-    true => mods
-    false => load_local_modules(paths, i + 1, n, source_dir, load_one_module(paths[i], source_dir, mods));
-
-// A local module is resolved like the reference does for a source file: from the
-// file's directory and from its parent (the project root for tests/*.test.ca).
-func load_one_module(path, source_dir, mods) = do
-    file = module_file(source_dir, path);
-    src = read_source(file);
-    match src == ""
-        true => mods
-        false => do
-            parsed = parser.parse_program(lexer.tokenize(src));
-            st = compiler.compile_program(parsed.statements);
-            match len(st.errors) > 0
-                true => mods
-                false => do
-                    ran = vm.run_module(st.consts, st.code, mods);
-                    hash_set(mods, path, exports_hash(st.globals, ran.globals, 0, len(st.globals), {}))
-                end
-        end
-end;
-
-func module_file(source_dir, path) = do
-    first = concat(source_dir, "/", path, "/mod.ca");
-    match io.exists(first)
-        true => first
-        false => concat(source_dir, "/../", path, "/mod.ca")
-end;
-
-// exports_hash turns the module's globals into a namespace: name -> value.
-func exports_hash(names, globals, i, n, acc) = match i >= n
-    true => acc
-    false => exports_hash(names, globals, i + 1, n,
-        hash_set(acc, names[i].name, globals_value(globals, names[i].index)));
-
-func globals_value(globals, index) = match index < len(globals)
-    true => globals[index]
-    false => 0;
 
 // check_file prints one finding per line as `<line>:<column>\ttype`, matching
 // `calcium check`.

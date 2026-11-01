@@ -15,12 +15,17 @@ use parser;
 use compiler;
 use serialize;
 use vm;
+use loader;
 
 func run(path, max_steps) = do
     src = read_source(path);
-    st = compiler.compile_program(parser.parse_program(lexer.tokenize(src)).statements);
+    parsed = parser.parse_program(lexer.tokenize(src));
+    st = compiler.compile_program(parsed.statements);
     main = vm.Closure(serialize.FunctionRecord("<main>", "entry", [], 0, false, st.code), []);
-    start = vm.push_frame(vm.new_state(st.consts), main, 0);
+    // Local modules are loaded the same way `main.ca run` loads them, so a trace
+    // reflects what the CLI actually executes.
+    mods = loader.load_modules(parsed.statements, path);
+    start = vm.push_frame(vm.with_modules(vm.new_state(st.consts), mods), main, 0);
     concat("# instructions: ", to_string(len(st.code)), ", constants: ", to_string(len(st.consts))) !> io.say;
     trace(start, 0, max_steps)
 end;

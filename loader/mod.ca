@@ -1,0 +1,106 @@
+// loader - resolve and load local modules for the self-hosted front end.
+//
+// A program's `use name;` is resolved by the host when the reference runs a
+// *source* file, but the self-hosted VM has no way to ask the host for a module.
+// This module does it instead: read `<root>/<name>/mod.ca`, compile it with the
+// self-hosted compiler, run its top-level code on the self-hosted VM, and expose
+// its globals as the module's exports.
+//
+// Everything here is pure: `io.exists` and `io.read_file` are pure, so results are
+// not wrapped in success/failure. (A `func!` with a match body is not wrapped
+// either, which made the previous version of this code look correct while
+// returning wrapped values in some paths.)
+
+namespace loader;
+
+use core.io!;
+use core.string;
+use core.array;
+use ast;
+use lexer;
+use parser;
+use compiler;
+use vm;
+
+// load_modules returns the module table for a parsed program: path -> exports.
+func load_modules(statements, source_path) = do
+    paths = use_paths(statements, 0, len(statements), []);
+    load_paths(paths, 0, len(paths), dir_of(source_path), {})
+end;
+
+func read_source(path) = io.read_file(path) !? {
+    success(v) => v
+    failure(e) => ""
+};
+
+// use_paths collects the non-core module paths a program imports.
+func use_paths(ss, i, n, acc) = match i >= n
+    true => acc
+    false => use_paths(ss, i + 1, n, add_use_path(ss[i], acc));
+
+func add_use_path(stmt, acc) = match stmt
+    Stmt.SUse(path, is_effect) => match is_core_path(path)
+        true => acc
+        false => push(acc, path)
+    _ => acc;
+
+func is_core_path(path) = string.starts_with(path, "core.");
+
+// dir_of keeps the leading empty component of an absolute path: joining from the
+// front preserves the first "/" that splitting produced.
+func dir_of(path) = do
+    parts = string.split(path, "/");
+    dir_of_prefix(parts, 0, len(parts) - 1, "")
+end;
+
+func dir_of_prefix(parts, i, n, acc) = match i >= n
+    true => match acc == ""
+        true => "."
+        false => acc
+    false => dir_of_prefix(parts, i + 1, n, append_part(acc, parts[i], i));
+
+func append_part(acc, part, i) = match i == 0
+    true => part
+    false => concat(acc, "/", part);
+
+func load_paths(paths, i, n, source_dir, mods) = match i >= n
+    true => mods
+    false => load_paths(paths, i + 1, n, source_dir, load_one(paths[i], source_dir, mods));
+
+// A module is resolved from the file's directory and from its parent, which is the
+// project root for `tests/*.test.ca`.
+func module_file(source_dir, path) = do
+    first = concat(source_dir, "/", path, "/mod.ca");
+    match io.exists(first)
+        true => first
+        false => concat(source_dir, "/../", path, "/mod.ca")
+end;
+
+func load_one(path, source_dir, mods) = do
+    file = module_file(source_dir, path);
+    src = read_source(file);
+    match src == ""
+        true => mods
+        false => load_compiled(path, src, mods)
+end;
+
+func load_compiled(path, src, mods) = do
+    parsed = parser.parse_program(lexer.tokenize(src));
+    st = compiler.compile_program(parsed.statements);
+    match len(st.errors) > 0
+        true => mods
+        false => do
+            ran = vm.run_module(st.consts, st.code, mods);
+            hash_set(mods, path, exports_hash(st.globals, ran.globals, 0, len(st.globals), {}))
+        end
+end;
+
+// exports_hash turns the module's globals into a namespace: name -> value.
+func exports_hash(names, globals, i, n, acc) = match i >= n
+    true => acc
+    false => exports_hash(names, globals, i + 1, n,
+        hash_set(acc, names[i].name, globals_value(globals, names[i].index)));
+
+func globals_value(globals, index) = match index < len(globals)
+    true => globals[index]
+    false => 0;
