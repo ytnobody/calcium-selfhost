@@ -1,0 +1,66 @@
+// trace - single-step a compiled program on the self-hosted VM.
+//
+// Prints one line per instruction: its index, the program counter, the opcode
+// number, the operand-stack size and the frame count. It is a debugging aid for
+// the VM; the opcode numbers are the ones in specs/bone-format.md.
+//
+// Run from this repository: `calcium tools/trace.ca <file.ca> [steps]`.
+
+use core.io!;
+use core.os!;
+use core.string;
+use core.types;
+use lexer;
+use parser;
+use compiler;
+use serialize;
+use vm;
+
+func run(path, max_steps) = do
+    src = read_source(path);
+    st = compiler.compile_program(parser.parse_program(lexer.tokenize(src)).statements);
+    main = vm.Closure(serialize.FunctionRecord("<main>", "entry", [], 0, false, st.code), []);
+    start = vm.push_frame(vm.new_state(st.consts), main, 0);
+    concat("# instructions: ", to_string(len(st.code)), ", constants: ", to_string(len(st.consts))) !> io.say;
+    trace(start, 0, max_steps)
+end;
+
+func read_source(path) = io.read_file(path) !? {
+    success(v) => v
+    failure(e) => ""
+};
+
+// take_stack shows only the live part of the operand stack.
+func take_stack(arr, n) = take_stack_loop(arr, 0, n, []);
+
+func take_stack_loop(arr, i, n, acc) = match i >= n
+    true => acc
+    false => take_stack_loop(arr, i + 1, n, push(acc, arr[i]));
+
+func trace(s, i, n) = match i >= n
+    true => 0
+    false => trace_step(s, i, n);
+
+func trace_step(s, i, n) = match len(s.frames) == 0
+    true => do
+        concat("done after ", to_string(i), " steps, last=", to_string(s.last)) !> io.say;
+        0
+    end
+    false => trace_live(s, i, n);
+
+func trace_live(s, i, n) = do
+    f = vm.current(s);
+    ip = vm.frame_ip(f);
+    code = vm.cl_body(vm.frame_cl(f));
+    op = match ip < len(code)
+        true => code[ip]
+        false => -1;
+    concat("step ", to_string(i), " ip=", to_string(ip), " op=", to_string(op),
+        " top=", to_string(s.top), " stack=", to_string(take_stack(s.stack, s.top))) !> io.say;
+    trace(vm.step(s), i + 1, n)
+end;
+
+args = os.args();
+path = get(args, 2, "");
+max_steps = types.to_int(get(args, 3, 20)) !? { success(v) => v  failure(e) => 20 };
+run(path, max_steps);

@@ -45,11 +45,16 @@ func set_state(st, stack, top, frames, last, globals) =
 func push_value(st, v) = set_state(st,
     put_at(st.stack, st.top, v), st.top + 1, st.frames, st.last, st.globals);
 
-// put_at grows the array when writing one past the end, which is how a stack
-// backed by an array behaves.
+// put_at writes at index i, padding with zeros when i is beyond the end. Writing
+// *past* the end matters: a global slot is allocated by index, and pushing would
+// put the value at the wrong index whenever an earlier slot is still unwritten.
 func put_at(arr, i, v) = match i < len(arr)
     true => replace_at(arr, 0, i, v, [])
-    false => push(arr, v);
+    false => pad_and_push(arr, i, v);
+
+func pad_and_push(arr, i, v) = match len(arr) >= i
+    true => push(arr, v)
+    false => pad_and_push(push(arr, 0), i, v);
 
 func replace_at(arr, j, i, v, acc) = match j >= len(arr)
     true => acc
