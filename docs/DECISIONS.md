@@ -259,3 +259,33 @@ not exercise parse errors.
 Implementing parse-error *reporting* would mean tracking a failure flag through
 the parser and surfacing it in `main.ca`; the `check` command would then print
 `<file>: parse errors` to match. Not started.
+
+## D16 — SH-4 (a VM in Calcium) is started, not finished (open, stretch goal)
+
+`vm/mod.ca` now holds the groundwork: the runtime value wrappers Calcium cannot
+express (closures, builtins, ADT values, host functions), the operand stack, the
+frame model, constant decoding and the operand-width table that the `.bone`
+format leaves implicit. The interpreter loop itself is **not written yet**, so
+this component is not marked implemented and the harness does not run it.
+
+Two things make SH-4 harder than SH-3, and both need a decision first:
+
+1. **There is no way to read a `.bone` from Calcium.** The slice avoids this by
+   interpreting the compiler's in-memory structures, which also makes the VM
+   testable without writing a deserializer. A standalone `run <file.bone>` would
+   need one.
+2. **The host's module loader is unreachable.** A Calcium program cannot ask the
+   reference VM to load `core.io`, so observable output needs either a registry
+   of Calcium-implemented modules (the sketch in `vm/mod.ca`) or a native hook.
+   Without one, a compiled program can compute but cannot print, which means no
+   differential test can see its result.
+
+Proposed next steps, in order:
+
+1. Write the dispatch loop for the opcode subset the compiler emits today
+   (constants, globals/locals, arithmetic, comparisons, jumps, calls, closures,
+   arrays/hashes/tuples/index/member, builtins, ADT construction and matching).
+2. Verify with `main.ca run <in.ca>`: compile with the self-hosted compiler, run
+   with the self-hosted VM, and compare against the reference run.
+3. Extend the module registry until the corpus passes, then decide whether a
+   `.bone` reader is worth adding.

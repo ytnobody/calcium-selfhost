@@ -1,10 +1,171 @@
-// vm - Bytecode interpreter (SH-4, stretch goal).
+// vm - a bytecode interpreter written in Calcium.
 //
-// Not implemented yet. See ../SPEC.md and
-// calcium-lang/specs/selfhost-scope.md for the stage plan and scope.
+// This is the first SH-4 slice: it interprets the structures the self-hosted
+// compiler already produces (its constant pool and instruction stream), so it
+// exercises instruction semantics without also needing a .bone reader.
+//
+// Values are Calcium values. Only what Calcium cannot express is wrapped:
+// closures, builtins, ADT values, and host functions.
+//
+// The interpreter runs on the reference VM, so a program that wants to print has
+// to reach the host's facilities. Module loading goes through a small registry of
+// Calcium-implemented modules instead of the host's loader.
 
 namespace vm;
 
-// implemented reports whether this component exists yet. The differential
-// harness uses it to decide which comparisons it can run.
-func implemented() = false;
+use core.string;
+use core.array;
+use core.types;
+use bytecode;
+use serialize;
+
+// ---------------------------------------------------------------------------
+// Runtime values
+// ---------------------------------------------------------------------------
+
+type Value =
+    Closure(record, free) |
+    BuiltinFn(index) |
+    AdtVal(type_name, tag, items) |
+    HostFn(name);
+
+type Frame = Frame(cl, ip, base);
+
+// State: operand stack, frames, globals, constant pool.
+func new_state(constants) = {stack: [], top: 0, frames: [], last: 0, globals: [], constants: constants};
+
+func set_state(st, stack, top, frames, last, globals) =
+    {stack: stack, top: top, frames: frames, last: last, globals: globals, constants: st.constants};
+
+// ---------------------------------------------------------------------------
+// Operand stack
+// ---------------------------------------------------------------------------
+
+func push_value(st, v) = set_state(st,
+    put_at(st.stack, st.top, v), st.top + 1, st.frames, st.last, st.globals);
+
+// put_at grows the array when writing one past the end, which is how a stack
+// backed by an array behaves.
+func put_at(arr, i, v) = match i < len(arr)
+    true => replace_at(arr, 0, i, v, [])
+    false => push(arr, v);
+
+func replace_at(arr, j, i, v, acc) = match j >= len(arr)
+    true => acc
+    false => replace_at(arr, j + 1, i, v, push(acc, choose(arr[j], v, j == i)));
+
+func choose(a, b, take_b) = match take_b
+    true => b
+    false => a;
+
+func pop_value(st) = {v: st.stack[st.top - 1], st: set_state(st, st.stack, st.top - 1, st.frames, st.last, st.globals)};
+
+func peek(st) = st.stack[st.top - 1];
+
+// ---------------------------------------------------------------------------
+// Frames
+// ---------------------------------------------------------------------------
+
+func current(st) = st.frames[len(st.frames) - 1];
+
+func push_frame(st, cl, base) = set_state(st, st.stack, st.top,
+    push(st.frames, Frame(cl, 0, base)), st.last, st.globals);
+
+func pop_frame(st) = set_state(st, st.stack, st.top,
+    take(st.frames, 0, len(st.frames) - 1, []), st.last, st.globals);
+
+func take(arr, i, n, acc) = match i >= n
+    true => acc
+    false => take(arr, i + 1, n, push(acc, arr[i]));
+
+func set_frame(st, f) = set_state(st, st.stack, st.top,
+    replace_at(st.frames, 0, len(st.frames) - 1, f, []), st.last, st.globals);
+
+func set_ip(st, ip) = set_frame(st, Frame(current(st).cl, ip, current(st).base));
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+func constant_value(c) = match c
+    Constant.CBool(v) => v
+    Constant.CInt(v) => v
+    Constant.CFloat(v) => v
+    Constant.CStr(v) => v
+    Constant.CAdt(name, tag, items) => AdtVal(name, tag, map_constants(items, 0, len(items), []))
+    Constant.CFunc(record) => Closure(record, [])
+    Constant.CRegex(pattern, flags) => pattern
+    _ => 0;
+
+func map_constants(items, i, n, acc) = match i >= n
+    true => acc
+    false => map_constants(items, i + 1, n, push(acc, constant_value(items[i])));
+
+// ---------------------------------------------------------------------------
+// Instruction encoding
+// ---------------------------------------------------------------------------
+
+func read_u16(code, ip) = code[ip + 1] * 256 + code[ip + 2];
+
+func read_u8(code, ip) = code[ip + 1];
+
+// width is the size of the instruction at `ip`, which the reference format does
+// not encode; it comes from the opcode's operand layout.
+func width(code, ip) = operand_bytes(code[ip]) + 1;
+
+func operand_bytes(op) = match op
+    bytecode.closure() => 3
+    bytecode.construct_adt() => 3
+    bytecode.match_adt() => 3
+    bytecode.constant() => 2
+    bytecode.get_global() => 2
+    bytecode.set_global() => 2
+    bytecode.get_member() => 2
+    bytecode.load_module() => 2
+    bytecode.array() => 2
+    bytecode.array_concat() => 2
+    bytecode.tuple() => 2
+    bytecode.hash_lit() => 2
+    bytecode.jump() => 2
+    bytecode.jump_if_false() => 2
+    bytecode.jump_if_true() => 2
+    bytecode.unwrap_or_jump() => 2
+    bytecode.get_local() => 1
+    bytecode.set_local() => 1
+    bytecode.get_free() => 1
+    bytecode.call() => 1
+    bytecode.tail_call() => 1
+    bytecode.call_effect() => 1
+    bytecode.builtin() => 1
+    _ => 0;
+
+// ---------------------------------------------------------------------------
+// Modules
+//
+// The host's module loader is not reachable from Calcium, so the interpreter
+// provides the few members it needs itself.
+// ---------------------------------------------------------------------------
+
+func module_member(path, name) = match path
+    "core.io" => io_member(name)
+    _ => HostFn("unsupported-module:");
+
+func io_member(name) = match name
+    "say" => HostFn("say")
+    "println" => HostFn("println")
+    "print" => HostFn("print")
+    _ => HostFn("unsupported-member:");
+
+// ---------------------------------------------------------------------------
+// Builtins
+// ---------------------------------------------------------------------------
+
+func builtin_names() = [
+    "len", "concat", "to_string", "get", "has", "head", "tail", "push",
+    "range", "map", "filter", "reduce", "keys", "values", "hash_set",
+    "hash_merge", "Int", "Float", "String", "Bool", "Array", "Hash", "Tuple",
+    "Function", "Number", "NonZero", "Positive", "NonNegative", "Natural",
+    "Finite", "NonEmpty", "Empty", "Digits", "Lowercase", "Uppercase"
+];
+
+func builtin_name(index) = builtin_names()[index];
