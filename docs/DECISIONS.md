@@ -262,11 +262,24 @@ the parser and surfacing it in `main.ca`; the `check` command would then print
 
 ## D16 — SH-4 (a VM in Calcium) is started, not finished (open, stretch goal)
 
-`vm/mod.ca` now holds the groundwork: the runtime value wrappers Calcium cannot
-express (closures, builtins, ADT values, host functions), the operand stack, the
-frame model, constant decoding and the operand-width table that the `.bone`
-format leaves implicit. The interpreter loop itself is **not written yet**, so
-this component is not marked implemented and the harness does not run it.
+`vm/mod.ca` now holds the runtime value wrappers Calcium cannot express
+(closures, builtins, ADT values, host functions), the operand stack, the frame
+model, constant decoding, the operand-width table the `.bone` format leaves
+implicit, and a dispatch loop for the opcode set the self-hosted compiler emits.
+
+Status: **the hello-world path works.** `main.ca run` compiles a program with the
+self-hosted compiler and executes it on the self-hosted VM; a program that loads
+`core.io` and prints a constant produces the same output as the reference.
+
+Open defect: a **builtin call** (`len`, `concat`, `to_string`, ...) does not
+reach the host, so `to_string(5) !> io.say` prints nothing while
+`"raw" !> io.say` and `1 + 2 !> io.say` work. Ruled out so far: `apply_builtin`
+and `call_builtin_value` both behave correctly when called directly from a probe
+(`apply_builtin("to_string", [5])` returns `"5"`, `call_builtin_value` returns
+`{v: 4, finished: true}` for `len("abcd")`), so the defect is in the integration
+path (`op_call` → `run_callee` → `apply`), most likely in how an effect function's
+success-wrapped result is unwrapped. The component is therefore **not** marked
+implemented and the harness does not run it.
 
 Two things make SH-4 harder than SH-3, and both need a decision first:
 

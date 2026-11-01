@@ -8,6 +8,7 @@ use formatter;
 use compiler;
 use serialize;
 use typechecker;
+use vm;
 
 // calcium-selfhost CLI entry point.
 //
@@ -28,7 +29,8 @@ func usage_lines() = [
     "  parse <in>                dump the AST summary (debugging only)",
     "  check <in>                dump type checker findings (debugging only)",
     "  fmt <in> -o <out>         format <in> into <out>",
-    "  compile <in> -o <out>     compile <in> into <out> (.bone)"
+    "  compile <in> -o <out>     compile <in> into <out> (.bone)",
+    "  run <in>                  compile <in> and run it on the self-hosted VM"
 ];
 
 func usage() = string.join(usage_lines(), "\n");
@@ -131,6 +133,16 @@ func compile_file(argv) = do
     io.write_file(output, serialize.to_string_bytes(compiler.to_bone(st)))
 end;
 
+// run_file compiles the input with the self-hosted compiler and executes the
+// result on the self-hosted VM. Modules are provided by the VM's own registry,
+// so only programs using `core.io` can produce output.
+func! run_file(path) = do
+    src = read_source(path)
+    parsed = parser.parse_program(lexer.tokenize(src))
+    st = compiler.compile_program(parsed.statements)
+    vm.run(st.consts, st.code)
+end;
+
 // check_file prints one finding per line as `<line>:<column>\ttype`, matching
 // `calcium check`.
 func check_file(path) = do
@@ -170,6 +182,7 @@ match get(args, 2)
     Maybe.Some("fmt") => fmt_file(args)
     Maybe.Some("compile") => compile_file(args)
     Maybe.Some("check") => check_file(get(args, 3, ""))
+    Maybe.Some("run") => run_file(get(args, 3, ""))
     Maybe.Some("help") => usage() !> io.say
     Maybe.Some(cmd) => unimplemented(cmd)
     Maybe.None => do

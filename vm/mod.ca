@@ -16,6 +16,7 @@ namespace vm;
 use core.string;
 use core.array;
 use core.types;
+use core.io!;
 use bytecode;
 use serialize;
 
@@ -69,7 +70,7 @@ func peek(st) = st.stack[st.top - 1];
 func current(st) = st.frames[len(st.frames) - 1];
 
 func push_frame(st, cl, base) = set_state(st, st.stack, st.top,
-    push(st.frames, Frame(cl, 0, base)), st.last, st.globals);
+    push(st.frames, make_frame(cl, 0, base)), st.last, st.globals);
 
 func pop_frame(st) = set_state(st, st.stack, st.top,
     take(st.frames, 0, len(st.frames) - 1, []), st.last, st.globals);
@@ -81,7 +82,25 @@ func take(arr, i, n, acc) = match i >= n
 func set_frame(st, f) = set_state(st, st.stack, st.top,
     replace_at(st.frames, 0, len(st.frames) - 1, f, []), st.last, st.globals);
 
-func set_ip(st, ip) = set_frame(st, Frame(current(st).cl, ip, current(st).base));
+// A Frame is an ADT, so its fields are destructured.
+func frame_cl(f) = match f
+    Frame.Frame(cl, ip, base) => cl
+    _ => Closure(serialize.FunctionRecord("", "entry", [], 0, false, []), []);
+
+func frame_ip(f) = match f
+    Frame.Frame(cl, ip, base) => ip
+    _ => 0;
+
+func frame_base(f) = match f
+    Frame.Frame(cl, ip, base) => base
+    _ => 0;
+
+func make_frame(cl, ip, base) = Frame(cl, ip, base);
+
+func set_ip(st, ip) = do
+    f = current(st);
+    set_frame(st, make_frame(frame_cl(f), ip, frame_base(f)))
+end;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -169,3 +188,538 @@ func builtin_names() = [
 ];
 
 func builtin_name(index) = builtin_names()[index];
+
+// ---------------------------------------------------------------------------
+// Function record accessors
+//
+// A FunctionRecord is a serialize ADT, so its fields are destructured.
+// ---------------------------------------------------------------------------
+
+func fn_name(r) = match r
+    FunctionRecord.FunctionRecord(name, module_id, params, nlocals, is_effect, body) => name
+    _ => "";
+
+func fn_body(r) = match r
+    FunctionRecord.FunctionRecord(name, module_id, params, nlocals, is_effect, body) => body
+    _ => [];
+
+func fn_num_locals(r) = match r
+    FunctionRecord.FunctionRecord(name, module_id, params, nlocals, is_effect, body) => nlocals
+    _ => 0;
+
+func cl_body(cl) = match cl
+    Closure(record, free) => fn_body(record)
+    _ => [];
+
+func cl_locals(cl) = match cl
+    Closure(record, free) => fn_num_locals(record)
+    _ => 0;
+
+func cl_free(cl) = match cl
+    Closure(record, free) => free
+    _ => [];
+
+// ---------------------------------------------------------------------------
+// Interpreter
+// ---------------------------------------------------------------------------
+
+func run(constants, instructions) = do
+    main = Closure(serialize.FunctionRecord("<main>", "entry", [], 0, false, instructions), []);
+    st = push_frame(new_state(constants), main, 0);
+    exec(st)
+end;
+
+// exec is tail-recursive: one step per instruction, so a long program does not
+// grow the stack.
+func exec(st) = match len(st.frames) == 0
+    true => st.last
+    false => exec(step(st));
+
+func step(st) = do
+    f = current(st);
+    code = cl_body(frame_cl(f));
+    ip = frame_ip(f);
+    match ip >= len(code)
+        true => finish(st)
+        false => finished_of(dispatch(st, code[ip], ip))
+end;
+
+func finished_of(next) = match next.ok
+    true => next.st
+    false => next.st;
+
+// finish pops a frame that has run out of instructions, which is how the main
+// program's body ends: it has no OpReturn of its own.
+func finish(st) = do
+    base = frame_base(current(st));
+    st2 = pop_frame(st);
+    value = match st.top > base
+        true => st.stack[st.top - 1]
+        false => 0;
+    set_state(st2, st2.stack, base, st2.frames, value, st2.globals)
+end;
+
+// advance moves the instruction pointer past the instruction at `ip`.
+func advance(st, ip) = set_ip(st, ip + width(cl_body(frame_cl(current(st))), ip));
+
+func fail(st, message) = {ok: false, st: set_state(st, st.stack, st.top, [], message, st.globals)};
+func done(st) = {ok: true, st: st};
+
+func dispatch(st, op, ip) = match op
+    bytecode.constant() => op_constant(st, ip)
+    bytecode.pop() => op_pop(st, ip)
+    bytecode.dup() => op_dup(st, ip)
+    bytecode.get_local() => op_get_local(st, ip)
+    bytecode.set_local() => op_set_local(st, ip)
+    bytecode.get_global() => op_get_global(st, ip)
+    bytecode.set_global() => op_set_global(st, ip)
+    bytecode.add() => op_numeric(st, ip, "add")
+    bytecode.sub() => op_numeric(st, ip, "sub")
+    bytecode.mul() => op_numeric(st, ip, "mul")
+    bytecode.div() => op_numeric(st, ip, "div")
+    bytecode.mod() => op_numeric(st, ip, "mod")
+    bytecode.pow() => op_numeric(st, ip, "pow")
+    bytecode.neg() => op_unary(st, ip, "neg")
+    bytecode.not() => op_unary(st, ip, "not")
+    bytecode.bit_not() => op_unary(st, ip, "bit_not")
+    bytecode.bit_and() => op_numeric(st, ip, "bit_and")
+    bytecode.bit_or() => op_numeric(st, ip, "bit_or")
+    bytecode.bit_xor() => op_numeric(st, ip, "bit_xor")
+    bytecode.shl() => op_numeric(st, ip, "shl")
+    bytecode.shr() => op_numeric(st, ip, "shr")
+    bytecode.equal() => op_compare(st, ip, "equal")
+    bytecode.not_equal() => op_compare(st, ip, "not_equal")
+    bytecode.less() => op_compare(st, ip, "less")
+    bytecode.greater() => op_compare(st, ip, "greater")
+    bytecode.less_equal() => op_compare(st, ip, "less_equal")
+    bytecode.greater_equal() => op_compare(st, ip, "greater_equal")
+    bytecode.jump() => set_ip_after(st, read_u16(cl_body(frame_cl(current(st))), ip))
+    bytecode.jump_if_false() => op_jump_if(st, ip, false)
+    bytecode.jump_if_true() => op_jump_if(st, ip, true)
+    bytecode.call() => op_call(st, ip, read_u8(cl_body(frame_cl(current(st))), ip))
+    bytecode.call_effect() => op_call(st, ip, read_u8(cl_body(frame_cl(current(st))), ip))
+    bytecode.tail_call() => op_tail_call(st, ip, read_u8(cl_body(frame_cl(current(st))), ip))
+    bytecode.ret() => op_ret(st, ip)
+    bytecode.closure() => op_closure(st, ip)
+    bytecode.get_free() => op_get_free(st, ip)
+    bytecode.array() => op_array(st, ip, read_u16(cl_body(frame_cl(current(st))), ip), false)
+    bytecode.array_concat() => op_array(st, ip, read_u16(cl_body(frame_cl(current(st))), ip), true)
+    bytecode.tuple() => op_tuple(st, ip, read_u16(cl_body(frame_cl(current(st))), ip))
+    bytecode.hash_lit() => op_hash(st, ip, read_u16(cl_body(frame_cl(current(st))), ip))
+    bytecode.index() => op_index(st, ip)
+    bytecode.get_member() => op_get_member(st, ip)
+    bytecode.load_module() => op_load_module(st, ip)
+    bytecode.builtin() => op_builtin(st, ip, read_u8(cl_body(frame_cl(current(st))), ip))
+    bytecode.true_() => op_push(st, ip, true)
+    bytecode.false_() => op_push(st, ip, false)
+    bytecode.none() => op_push(st, ip, Maybe.None)
+    bytecode.construct_adt() => op_construct_adt(st, ip)
+    bytecode.match_adt() => op_match_adt(st, ip)
+    bytecode.wrap_success() => op_wrap(st, ip, true)
+    bytecode.wrap_failure() => op_wrap(st, ip, false)
+    bytecode.is_success() => op_is_wrapped(st, ip, true)
+    bytecode.is_failure() => op_is_wrapped(st, ip, false)
+    bytecode.unwrap() => op_unwrap(st, ip)
+    bytecode.match_fail() => fail(st, "no match arm matched")
+    _ => fail(st, concat("unsupported opcode ", to_string(op)));
+
+func set_ip_after(st, ip) = done(set_ip(st, ip));
+
+// ---------------------------------------------------------------------------
+// Simple opcodes
+// ---------------------------------------------------------------------------
+
+func op_constant(st, ip) = done(advance(push_value(st, constant_value(st.constants[read_u16(cl_body(frame_cl(current(st))), ip)])), ip));
+
+func op_pop(st, ip) = done(advance(pop_value(st).st, ip));
+
+func op_dup(st, ip) = done(advance(push_value(st, peek(st)), ip));
+
+func op_push(st, ip, v) = done(advance(push_value(st, v), ip));
+
+func op_get_local(st, ip) = do
+    idx = read_u8(cl_body(frame_cl(current(st))), ip);
+    done(advance(push_value(st, st.stack[frame_base(current(st)) + idx]), ip))
+end;
+
+func op_set_local(st, ip) = do
+    idx = read_u8(cl_body(frame_cl(current(st))), ip);
+    r = pop_value(st);
+    target = frame_base(current(st)) + idx;
+    done(advance(set_state(r.st, put_at(r.st.stack, target, r.v), r.st.top, r.st.frames, r.st.last, r.st.globals), ip))
+end;
+
+func op_get_global(st, ip) = do
+    idx = read_u16(cl_body(frame_cl(current(st))), ip);
+    done(advance(push_value(st, st.globals[idx]), ip))
+end;
+
+func op_set_global(st, ip) = do
+    idx = read_u16(cl_body(frame_cl(current(st))), ip);
+    r = pop_value(st);
+    done(advance(set_globals(r.st, put_at(r.st.globals, idx, r.v)), ip))
+end;
+
+func set_globals(st, globals) = set_state(st, st.stack, st.top, st.frames, st.last, globals);
+
+func op_get_free(st, ip) = do
+    idx = read_u8(cl_body(frame_cl(current(st))), ip);
+    done(advance(push_value(st, cl_free(current(st).cl)[idx]), ip))
+end;
+
+func op_closure(st, ip) = do
+    code = cl_body(frame_cl(current(st)));
+    idx = read_u16(code, ip);
+    count = code[ip + 3];
+    frees = pop_n(st, count);
+    cl = Closure(constant_record(st.constants[idx]), frees.items);
+    done(advance(push_value(frees.st, cl), ip))
+end;
+
+func constant_record(c) = match c
+    Constant.CFunc(record) => record
+    _ => serialize.FunctionRecord("", "entry", [], 0, false, []);
+
+// pop_n removes n values, preserving their order.
+func pop_n(st, n) = pop_n_loop(st, n, []);
+
+func pop_n_loop(st, n, acc) = match n <= 0
+    true => {st: st, items: acc}
+    false => do
+        r = pop_value(st);
+        pop_n_loop(r.st, n - 1, push_front(acc, r.v))
+    end;
+
+func push_front(arr, v) = push_front_loop(arr, v, 0, len(arr), [v]);
+
+func push_front_loop(arr, v, i, n, acc) = match i >= n
+    true => acc
+    false => push_front_loop(arr, v, i + 1, n, push(acc, arr[i]));
+
+// ---------------------------------------------------------------------------
+// Arithmetic and comparison
+// ---------------------------------------------------------------------------
+
+func op_numeric(st, ip, kind) = do
+    r = pop_value(st);
+    l = pop_value(r.st);
+    done(advance(push_value(l.st, numeric(kind, l.v, r.v)), ip))
+end;
+
+func numeric(kind, a, b) = match kind
+    "add" => a + b
+    "sub" => a - b
+    "mul" => a * b
+    "div" => a / b
+    "mod" => a % b
+    "pow" => a ** b
+    "bit_and" => a & b
+    "bit_or" => a | b
+    "bit_xor" => a ^ b
+    "shl" => a << b
+    "shr" => a >> b
+    _ => 0;
+
+func op_unary(st, ip, kind) = do
+    r = pop_value(st);
+    done(advance(push_value(r.st, unary(kind, r.v)), ip))
+end;
+
+func unary(kind, v) = match kind
+    "neg" => 0 - v
+    "not" => !v
+    "bit_not" => ^v
+    _ => v;
+
+func op_compare(st, ip, kind) = do
+    r = pop_value(st);
+    l = pop_value(r.st);
+    done(advance(push_value(l.st, compare(kind, l.v, r.v)), ip))
+end;
+
+func compare(kind, a, b) = match kind
+    "equal" => a == b
+    "not_equal" => a != b
+    "less" => a < b
+    "greater" => a > b
+    "less_equal" => a <= b
+    "greater_equal" => a >= b
+    _ => false;
+
+// ---------------------------------------------------------------------------
+// Jumps
+// ---------------------------------------------------------------------------
+
+func op_jump_if(st, ip, want_true) = do
+    r = pop_value(st);
+    target = read_u16(cl_body(frame_cl(current(st))), ip);
+    jump = match r.v
+        true => want_true
+        false => !want_true;
+    match jump
+        true => done(set_ip(r.st, target))
+        false => done(advance(r.st, ip))
+end;
+
+// ---------------------------------------------------------------------------
+// Calls
+// ---------------------------------------------------------------------------
+
+// run_callee is effectful (a host call prints), so its result arrives wrapped in
+// success/failure and has to be unwrapped here.
+func op_call(st, ip, nargs) = do
+    base = st.top - nargs;
+    callee = st.stack[base - 1];
+    apply(unwrap_callee(run_callee(st, callee, base, nargs, false), st), ip)
+end;
+
+func op_tail_call(st, ip, nargs) = do
+    base = st.top - nargs;
+    callee = st.stack[base - 1];
+    apply(unwrap_callee(run_callee(st, callee, base, nargs, true), st), ip)
+end;
+
+func unwrap_callee(wrapped, st) = wrapped !? {
+    success(v) => v
+    failure(e) => failed_callee(st, e)
+};
+
+func failed_callee(st, reason) = {finished: true, st: st, v: failure(reason)};
+
+func apply(r, ip) = match r.finished
+    true => done(advance(push_value(r.st, r.v), ip))
+    false => done(r.st);
+
+// run_callee either finishes a builtin (whose result is `v`) or pushes a frame
+// for a closure. Tail calls replace the current frame instead of growing the
+// frame stack.
+func! run_callee(st, callee, base, nargs, tail) = match callee
+    Closure(record, frees) => call_closure(st, callee, base, nargs, tail)
+    BuiltinFn(index) => call_builtin_value(st, index, base, nargs)
+    HostFn(name) => call_host(st, name, base, nargs)
+    _ => {finished: true, st: st, v: 0};
+
+func call_closure(st, callee, base, nargs, tail) = do
+    locals_count = cl_locals(callee);
+    top = base + locals_count;
+    st2 = set_state(st, st.stack, top, st.frames, st.last, st.globals);
+    match tail
+        true => {finished: false, st: set_frame_tail(st2, callee)}
+        false => {finished: false, st: push_frame(st2, callee, base)}
+end;
+
+func set_frame_tail(st, callee) = set_frame(st, make_frame(callee, 0, frame_base(current(st))));
+
+// A return removes the frame, drops the callee and argument slots, and leaves the
+// return value in their place for the caller.
+func op_ret(st, ip) = do
+    r = pop_value(st);
+    base = frame_base(current(st));
+    st2 = pop_frame(r.st);
+    st3 = set_state(st2, st2.stack, base - 1, st2.frames, r.v, st2.globals);
+    {ok: true, st: push_value(st3, r.v)}
+end;
+
+// ---------------------------------------------------------------------------
+// Containers
+// ---------------------------------------------------------------------------
+
+func op_array(st, ip, n, concat) = do
+    r = pop_n(st, n);
+    done(advance(push_value(r.st, r.items), ip))
+end;
+
+// A tuple is represented as an array: Calcium has no way to build a tuple value
+// dynamically, and the difference is only visible in to_string.
+func op_tuple(st, ip, n) = op_array(st, ip, n, false);
+
+func op_hash(st, ip, n) = do
+    r = pop_n(st, n * 2);
+    done(advance(push_value(r.st, build_hash(r.items, 0, len(r.items), {})), ip))
+end;
+
+func build_hash(items, i, n, acc) = match i + 1 >= n
+    true => acc
+    false => build_hash(items, i + 2, n, hash_set(acc, items[i], items[i + 1]));
+
+func op_index(st, ip) = do
+    idx = pop_value(st);
+    obj = pop_value(idx.st);
+    done(advance(push_value(obj.st, index_into(obj.v, idx.v)), ip))
+end;
+
+func index_into(obj, idx) = match types.is_array(obj)
+    true => obj[idx]
+    false => match types.is_hash(obj)
+        true => get(obj, idx)
+        false => obj;
+
+func op_get_member(st, ip) = do
+    name = member_name(st, read_u16(cl_body(frame_cl(current(st))), ip));
+    obj = pop_value(st);
+    done(advance(push_value(obj.st, member_of(obj.v, name)), ip))
+end;
+
+func member_name(st, idx) = match st.constants[idx]
+    Constant.CStr(v) => v
+    _ => "";
+
+func member_of(obj, name) = match types.is_hash(obj)
+    true => module_or_hash(obj, name)
+    false => obj;
+
+// A module is represented as a hash with a `__module` marker.
+func module_or_hash(obj, name) = match get(obj, "__module", "")
+    "core.io" => module_member("core.io", name)
+    _ => get(obj, name);
+
+func op_load_module(st, ip) = do
+    path = member_name(st, read_u16(cl_body(frame_cl(current(st))), ip));
+    done(advance(push_value(st, {"__module": path}), ip))
+end;
+
+func op_builtin(st, ip, index) = done(advance(push_value(st, BuiltinFn(index)), ip));
+
+// ---------------------------------------------------------------------------
+// ADTs and Result values
+// ---------------------------------------------------------------------------
+
+func op_construct_adt(st, ip) = do
+    code = cl_body(frame_cl(current(st)));
+    tag = member_name(st, read_u16(code, ip));
+    arity = code[ip + 3];
+    r = pop_n(st, arity);
+    done(advance(push_value(r.st, make_adt(tag, r.items)), ip))
+end;
+
+func make_adt(tag, items) = do
+    parts = string.split(tag, ".");
+    type_name = match len(parts) > 1
+        true => parts[0]
+        false => tag;
+    variant = match len(parts) > 1
+        true => parts[1]
+        false => tag;
+    AdtVal(type_name, variant, items)
+end;
+
+func op_match_adt(st, ip) = do
+    expected = member_name(st, read_u16(cl_body(frame_cl(current(st))), ip));
+    r = pop_value(st);
+    done(advance(push_value(r.st, adt_matches(r.v, expected)), ip))
+end;
+
+func adt_matches(v, expected) = match v
+    AdtVal(type_name, tag, items) => tag == expected || concat(type_name, ".", tag) == expected
+    _ => false;
+
+func op_wrap(st, ip, ok) = do
+    r = pop_value(st);
+    done(advance(push_value(r.st, wrap_value(r.v, ok)), ip))
+end;
+
+// Result values are represented with the interpreter's own ADT rather than
+// Calcium's `success`/`failure`: those are keywords, so their payload cannot be
+// destructured with a constructor pattern.
+func wrap_value(v, ok) = match ok
+    true => AdtVal("Result", "success", [v])
+    false => AdtVal("Result", "failure", [v]);
+
+func op_is_wrapped(st, ip, want_success) = do
+    r = pop_value(st);
+    done(advance(push_value(r.st, is_wrapped(r.v, want_success)), ip))
+end;
+
+func is_wrapped(v, want_success) = match v
+    AdtVal(type_name, tag, items) => result_tag(tag, want_success)
+    _ => false;
+
+func result_tag(tag, want_success) = match want_success
+    true => tag == "success"
+    false => tag == "failure";
+
+func op_unwrap(st, ip) = do
+    r = pop_value(st);
+    done(advance(push_value(r.st, unwrapped(r.v)), ip))
+end;
+
+func unwrapped(v) = match v
+    AdtVal(type_name, tag, items) => items[0]
+    _ => v;
+
+// ---------------------------------------------------------------------------
+// Builtin calls
+// ---------------------------------------------------------------------------
+
+func call_builtin_value(st, index, base, nargs) = do
+    r = pop_n(st, nargs);
+    result = apply_builtin(builtin_name(index), r.items);
+    remaining = set_state(r.st, r.st.stack, base - 1, r.st.frames, r.st.last, r.st.globals);
+    {finished: true, st: remaining, v: result}
+end;
+
+func apply_builtin(name, args) = match name
+    "len" => len_of(args[0])
+    "concat" => concat_values(args)
+    "to_string" => to_string(args[0])
+    "Int" => types.is_int(args[0])
+    "Float" => types.is_float(args[0])
+    "String" => types.is_string(args[0])
+    "Bool" => types.is_bool(args[0])
+    "Array" => types.is_array(args[0])
+    "Hash" => types.is_hash(args[0])
+    "Tuple" => types.is_array(args[0])
+    "Function" => types.is_function(args[0])
+    "Number" => types.is_number(args[0])
+    "NonZero" => args[0] != 0
+    "Positive" => args[0] > 0
+    "NonNegative" => args[0] >= 0
+    "Natural" => args[0] >= 0
+    "Finite" => true
+    "NonEmpty" => len_of(args[0]) > 0
+    "Empty" => len_of(args[0]) == 0
+    _ => failure(concat("unsupported builtin: ", name));
+
+func len_of(v) = match types.is_array(v)
+    true => len(v)
+    false => match types.is_string(v)
+        true => len(v)
+        false => match types.is_hash(v)
+            true => len(keys(v))
+            false => 0;
+
+func concat_values(args) = match len(args) == 0
+    true => ""
+    false => concat_values_loop(args, 0, len(args), "");
+
+func concat_values_loop(args, i, n, acc) = match i >= n
+    true => acc
+    false => concat_values_loop(args, i + 1, n, concat(acc, args[i]));
+
+// ---------------------------------------------------------------------------
+// Host calls
+//
+// Printing has no Calcium implementation, so `core.io` members are forwarded to
+// the reference VM's own facilities. Anything else is unsupported.
+// ---------------------------------------------------------------------------
+
+func! call_host(st, name, base, nargs) = do
+    r = pop_n(st, nargs);
+    result = host_apply(name, r.items) !? {
+        success(v) => v
+        failure(e) => failure(e)
+    };
+    remaining = set_state(r.st, r.st.stack, base - 1, r.st.frames, r.st.last, r.st.globals);
+    {finished: true, st: remaining, v: result}
+end;
+
+func! host_apply(name, args) = match name
+    "say" => host_say(args)
+    "println" => host_say(args)
+    "print" => host_say(args)
+    _ => failure(concat("unsupported host function: ", name));
+
+func! host_say(args) = do
+    io.say(to_string(args[0]));
+    Maybe.None
+end;
