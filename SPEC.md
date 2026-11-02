@@ -35,16 +35,21 @@ SH-2 progress:
 - **type checker** — done, verified against twelve fixtures with `calcium check`; see D13.
 
 SH-4 progress: the interpreter is wired into the harness and matches the reference
-on the nine examples it supports. Its boundary is explicit rather than accidental:
+on the examples it supports and on twelve of the sixteen files in `tests/`. Its
+boundary is explicit rather than accidental:
 
 - **Not supported, by decision:** the six async examples. The reference schedules
   them on goroutines and channels and supplies event sources such as
   `schedule.timeout` natively; reimplementing that in Calcium is the open question
   D2. The interpreter does not attempt it.
-- **Not supported:** loading a *local* module (`use test;` in tests/*.test.ca).
-  `use` is resolved by the host loader, which Calcium cannot reach, so the stage is
-  limited to examples/.
-- **Also out of reach:** `constraint.ca`, which needs the static constraint checker.
+- **Supported:** loading a *local* module. The loader (`loader/mod.ca`) reads
+  `<dir>/<name>/mod.ca`, compiles it with the self-hosted compiler, runs its
+  top-level code on the same VM and exposes its globals as the exports, so
+  `use test;` resolves the way it does for the reference (D17).
+- **Also out of reach:** the three `*_constraint.test.ca` files, which need the
+  static constraint checker (D13).
+- **Slow rather than missing:** `tco.test.ca` recurses 50000 deep; it passes, in
+  about 40 s. See D19 for the measurement.
 
 SH-3 progress: the compiler emits .bone that behaves like the reference on every
 comparable corpus file (100 comparisons pass). Three files are excluded: two
