@@ -127,6 +127,10 @@ run_check() {
         return 0
     fi
     local f out_oracle out_cand
+    # The fixtures carry the mismatches; the corpus checks that the checker stays
+    # quiet where the reference is quiet, which is where a false positive would
+    # show up.
+    mapfile -t files < <( { printf '%s\n' "$ROOT/tests/typecheck"/*.ca; corpus_files; } | sort)
     for f in "${files[@]}"; do
         if ! "$ORACLE" check "$f" </dev/null >"$WORK/ck.oracle" 2>&1; then :; fi
         if ! candidate check "$f" </dev/null >"$WORK/ck.cand" 2>&1; then :; fi
