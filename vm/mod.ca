@@ -30,7 +30,7 @@ use serialize;
 // ---------------------------------------------------------------------------
 
 type Value =
-    Closure(record, free, consts, globals) |
+    Closure(record, free, consts, mod) |
     BuiltinFn(index) |
     AdtVal(type_name, tag, items) |
     HostFn(name);
@@ -95,9 +95,20 @@ func push_frame(st, cl, base) = set_state(st, st.stack, st.top,
 // that is already running that unit. Taking the array from the frame (instead of
 // from each closure) is what keeps a chain of sibling module calls on the right
 // unit: only the first call has a stamped closure.
-func entry_globals(st, cl) = match len(cl_globals(cl)) > 0
-    true => cl_globals(cl)
-    false => caller_globals(st);
+func entry_globals(st, cl) = do
+    match cl_mod(cl) != "" && len(module_globals(st, cl_mod(cl))) == 0
+        true => concat("NOGLOB ", cl_mod(cl)) !> io.say
+        false => 0;
+    entry_globals_1(st, cl)
+end;
+
+func entry_globals_1(st, cl) = match cl_mod(cl) == ""
+    true => caller_globals(st)
+    false => module_globals(st, cl_mod(cl));
+
+func module_globals(st, id) = get(st.modules, globals_key(id), []);
+
+func globals_key(id) = concat("__globals:", id);
 
 func caller_globals(st) = match len(st.frames) == 0
     true => []
@@ -116,7 +127,7 @@ func set_frame(st, f) = set_state(st, st.stack, st.top,
 // A Frame is an ADT, so its fields are destructured.
 func frame_cl(f) = match f
     Frame.Frame(cl, ip, base, globals) => cl
-    _ => Closure(serialize.FunctionRecord("", "entry", [], 0, false, []), [], [], []);
+    _ => Closure(serialize.FunctionRecord("", "entry", [], 0, false, []), [], [], "");
 
 func frame_ip(f) = match f
     Frame.Frame(cl, ip, base, globals) => ip
@@ -150,7 +161,7 @@ func constant_value(c, pool) = match c
     Constant.CFloat(v) => v
     Constant.CStr(v) => v
     Constant.CAdt(name, tag, items) => AdtVal(name, tag, map_constants(items, pool, 0, len(items), []))
-    Constant.CFunc(record) => Closure(record, [], pool, [])
+    Constant.CFunc(record) => Closure(record, [], pool, "")
     Constant.CRegex(pattern, flags) => compile_regex(pattern, flags)
     _ => 0;
 
@@ -237,29 +248,30 @@ func fn_num_locals(r) = match r
     _ => 0;
 
 func cl_body(cl) = match cl
-    Closure(record, free, consts, globals) => fn_body(record)
+    Closure(record, free, consts, mod) => fn_body(record)
     _ => [];
 
 func cl_locals(cl) = match cl
-    Closure(record, free, consts, globals) => fn_num_locals(record)
+    Closure(record, free, consts, mod) => fn_num_locals(record)
     _ => 0;
 
 func cl_free(cl) = match cl
-    Closure(record, free, consts, globals) => free
+    Closure(record, free, consts, mod) => free
 
 func cl_consts(cl) = match cl
-    Closure(record, free, consts, globals) => consts
+    Closure(record, free, consts, mod) => consts
 
-// cl_globals is the unit's global array, or [] when the closure belongs to the
-// program the state is already running (then the state's globals are used).
-func cl_globals(cl) = match cl
-    Closure(record, free, consts, globals) => globals
+// cl_mod names the unit a closure was compiled in: "" for the program the state
+// is already running, otherwise the module path. The array itself lives in the
+// state (see module_globals) so that closures do not point back at each other.
+func cl_mod(cl) = match cl
+    Closure(record, free, consts, mod) => mod
 
 // adopt_globals gives a value the unit's global array. A module's exported
 // functions are called later by the main program, but `OpGetGlobal` inside them
 // must still resolve the module's names, not the caller's.
-func adopt_globals(v, globals) = match v
-    Closure(record, free, consts, own) => Closure(record, free, consts, globals)
+func adopt_globals(v, id) = match v
+    Closure(record, free, consts, own) => Closure(record, free, consts, id)
     _ => v;
 
 // ---------------------------------------------------------------------------
@@ -269,7 +281,7 @@ func adopt_globals(v, globals) = match v
 func run(constants, instructions) = run_with_modules(constants, instructions, {});
 
 func run_with_modules(constants, instructions, modules) = do
-    main = Closure(serialize.FunctionRecord("<main>", "entry", [], 0, false, instructions), [], constants, []);
+    main = Closure(serialize.FunctionRecord("<main>", "entry", [], 0, false, instructions), [], constants, "");
     st = push_frame(with_modules(new_state(constants), modules), main, 0);
     exec(st)
 end;
@@ -277,7 +289,7 @@ end;
 // run_module executes a module's top-level code and returns the resulting state,
 // whose globals hold the module's exports.
 func run_module(constants, instructions, modules) = do
-    main = Closure(serialize.FunctionRecord("<module>", "entry", [], 0, false, instructions), [], constants, []);
+    main = Closure(serialize.FunctionRecord("<module>", "entry", [], 0, false, instructions), [], constants, "");
     st = push_frame(with_modules(new_state(constants), modules), main, 0);
     exec_state(st)
 end;
@@ -472,7 +484,7 @@ func op_closure(st, ip) = do
     count = code[ip + 3];
     frees = pop_n(st, count);
     outer = frame_cl(current(st));
-    cl = Closure(constant_record(cl_consts(outer)[idx]), frees.items, cl_consts(outer), cl_globals(outer));
+    cl = Closure(constant_record(cl_consts(outer)[idx]), frees.items, cl_consts(outer), cl_mod(outer));
     done(advance(push_value(frees.st, cl), ip))
 end;
 

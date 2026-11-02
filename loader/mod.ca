@@ -94,22 +94,25 @@ func load_compiled(path, src, mods) = do
             // The whole array is stamped, not just the exported entries: a module
             // function that calls a sibling reads it back out of this array, and an
             // unstamped sibling would fall back to the caller's globals.
-            gs = stamp_globals(ran.globals, 0, len(ran.globals), []);
-            hash_set(mods, path, exports_hash(st.globals, gs, 0, len(st.globals), {}))
+            // The module's globals live in the module table under a reserved key;
+            // its closures only carry the path, which keeps them acyclic.
+            gs = stamp_globals(ran.globals, path, 0, len(ran.globals), []);
+            keyed = hash_set(mods, vm.globals_key(path), ran.globals);
+            hash_set(keyed, path, exports_hash(st.globals, path, gs, 0, len(st.globals), {}))
         end
 end;
 
 // adopt_globals is applied to a whole array at once; see vm.adopt_globals.
-func stamp_globals(gs, i, n, acc) = match i >= n
+func stamp_globals(gs, id, i, n, acc) = match i >= n
     true => acc
-    false => stamp_globals(gs, i + 1, n, push(acc, vm.adopt_globals(gs[i], gs)));
+    false => stamp_globals(gs, id, i + 1, n, push(acc, vm.adopt_globals(gs[i], id)));
 
 // exports_hash turns the module's globals into a namespace: name -> value.
-func exports_hash(names, globals, i, n, acc) = match i >= n
+func exports_hash(names, id, globals, i, n, acc) = match i >= n
     true => acc
-    false => exports_hash(names, globals, i + 1, n,
+    false => exports_hash(names, id, globals, i + 1, n,
         hash_set(acc, names[i].name,
-            vm.adopt_globals(globals_value(globals, names[i].index), globals)));
+            vm.adopt_globals(globals_value(globals, names[i].index), id)));
 
 func globals_value(globals, index) = match index < len(globals)
     true => globals[index]
