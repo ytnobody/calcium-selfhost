@@ -314,9 +314,17 @@ state rebuilds.
 
 Tried and measured as no-ops: a fast path in `put_at`, resolving the module id
 once in `entry_globals`, inlining the opcode-width table instead of calling into
-`bytecode`, and reordering the dispatch match. The remaining lever is threading
-`code` (and the frame base) into the opcode handlers so they stop re-deriving it,
-which would touch ~20 sites for an estimated 30-40%.
+`bytecode`, and reordering the dispatch match.
+
+What did help: `step_op` handles the opcodes a loop spends its time in
+(`constant`, `get_local`, `set_local`, `get_global`, `dup`, `pop`, arithmetic,
+comparisons, jumps) with the frame, code and ip already in hand, so a stack change
+and an ip change land in one state update instead of two or three. 4000-deep
+count: 3.00 s -> 2.37 s (~20%).
+
+The remaining lever is threading the frame and code through *every* opcode
+handler so they stop re-deriving `frame_cl`/`cl_body`; the same measurement puts
+the remaining cost there.
 
 `tests/tco.test.ca` (50000 deep) is therefore kept *in* the harness rather than
 excluded: it passes, it just takes ~40 s, and excluding it would hide a real
