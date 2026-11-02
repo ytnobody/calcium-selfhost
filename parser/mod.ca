@@ -370,8 +370,23 @@ func parse_bracket_statement(toks) = match peek_kind(toks) == "IDENT" && peek2_k
     false => parse_bracket_rest(toks);
 
 func parse_bracket_rest(toks) = match peek_kind(toks) == "IDENT" && peek2_kind(toks) == ","
-    true => parse_array_destr(toks)
+    true => parse_named_or_expr(toks)
     false => parse_destructure_or_expr(toks);
+
+// `[a, b] = v` destructures, but `[a, b]` on its own is an array literal. The two
+// only differ after the closing bracket, so the tokens are scanned ahead: without
+// the `=` an array in the last position of a `do` block used to vanish.
+func parse_named_or_expr(toks) = match closes_then_eq(toks)
+    true => parse_array_destr(toks)
+    false => parse_expression_statement(toks);
+
+func closes_then_eq(toks) = match is_kind(toks, "EOF")
+    true => false
+    false => closes_then_eq_1(toks);
+
+func closes_then_eq_1(toks) = match kind(toks) == "]"
+    true => peek_kind(toks) == "="
+    false => closes_then_eq(rest(toks));
 
 func parse_destructure_or_expr(toks) = match peek2_kind(toks) == "]"
     true => parse_array_destr_or_expr(toks)

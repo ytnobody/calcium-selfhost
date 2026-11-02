@@ -188,6 +188,8 @@ func compile_statement(st, stmt) = match stmt
     // An annotated binding compiles like a plain one: the annotation is checked
     // statically, not at run time.
     Stmt.SAssignAnnot(name, annot, value) => compile_assign(st, name, value)
+    Stmt.SArrayDestr(names, value) => compile_array_destr(st, names, value)
+    Stmt.SHeadTailDestr(head, tail, value) => compile_head_tail(st, head, tail, value)
     _ => compile_unsupported_stmt(st);
 
 // A construct the compiler does not handle must not compile to *nothing*: an empty
@@ -380,6 +382,46 @@ func width_of(code, ip) = bytecode.operand_bytes(code[ip]) + 1;
 
 // A top-level assignment binds a global; inside a function it binds a local, as
 // the reference does. Variables are immutable, so a name is bound once.
+// Array destructuring `[a, b] = arr` evaluates the array once and reads each
+// element by index; a HeadTail pattern reads element 0 and the tail builtin.
+func compile_array_destr(st, names, value) = do
+    r = compile_expr(st, value);
+    bind_elements(r.st, names, 0, len(names))
+end;
+
+func bind_elements(st, names, i, n) = match i >= n
+    true => st
+    false => bind_elements(bind_indexed(st, i, n, names[i]), names, i + 1, n);
+
+// bind_indexed leaves the array on the stack for the elements that follow, so
+// only the last one consumes it.
+func bind_indexed(st, i, n, name) = do
+    kept = match i < n - 1
+        true => emit(st, bytecode.ins(bytecode.dup()))
+        false => st;
+    added = add_constant(kept, serialize.CInt(i));
+    pushed = emit(added.st, bytecode.ins_u16(bytecode.constant(), added.index));
+    indexed = emit(pushed, bytecode.ins(bytecode.index()));
+    bind_value(indexed, name)
+end;
+
+func compile_head_tail(st, head, tail, value) = do
+    r = compile_expr(st, value);
+    zero = add_constant(r.st, serialize.CInt(0));
+    pushed = emit(zero.st, bytecode.ins_u16(bytecode.constant(), zero.index));
+    indexed = emit(pushed, bytecode.ins(bytecode.index()));
+    headed = bind_value(indexed, head);
+    built = emit(headed, bytecode.ins_u8(bytecode.builtin(), 6));
+    again = compile_expr(built, value);
+    called = emit(again.st, bytecode.ins_u8(bytecode.call(), 1));
+    bind_value(called, tail)
+end;
+
+// bind_value emits the SetLocal/SetGlobal for a value already on the stack.
+func bind_value(st, name) = match st.in_fn
+    true => define_local_assign(st, name)
+    false => define_global_assign(st, name);
+
 func compile_assign(st, name, value) = do
     r = compile_expr(st, value);
     match r.st.in_fn
