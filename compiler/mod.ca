@@ -183,7 +183,18 @@ func compile_statement(st, stmt) = match stmt
     Stmt.SAssign(name, value) => compile_assign(st, name, value)
     Stmt.SType(name, variants) => compile_variants(st, name, variants, 0, len(variants))
     Stmt.SConstraint(name, params, body) => compile_function(st, name, params, [], no_annotation(), false, body)
-    _ => st;
+    // A namespace is a formatter-level grouping; it emits nothing.
+    Stmt.SNamespace(path) => st
+    // An annotated binding compiles like a plain one: the annotation is checked
+    // statically, not at run time.
+    Stmt.SAssignAnnot(name, annot, value) => compile_assign(st, name, value)
+    _ => compile_unsupported_stmt(st);
+
+// A construct the compiler does not handle must not compile to *nothing*: an empty
+// body looks like it works, and the missing `do` branch once made every module
+// function return its arguments. Recording an error makes `run` and `compile` say
+// so instead.
+func compile_unsupported_stmt(st) = add_error(st, 0, 0, "unsupported statement");
 
 // A function declaration compiles its body into a FunctionRecord constant and
 // leaves a closure for it in a global.
@@ -476,7 +487,7 @@ func compile_expr(st, e) = match e
     Expr.EInterp(parts) => compile_interp(st, parts, 0, len(parts))
     Expr.ESpread(value) => compile_spread(st, value)
     Expr.EWild => {e: ast.EWild, st: emit(st, bytecode.ins(bytecode.true_()))}
-    _ => {e: ast.EWild, st: st};
+    _ => {e: ast.EWild, st: add_error(st, 0, 0, "unsupported expression")};
 
 // A do block evaluates its statements for their effects and yields the final
 // expression. Statements other than the last are popped; the last statement of
