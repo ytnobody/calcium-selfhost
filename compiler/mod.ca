@@ -154,6 +154,18 @@ func compile_program(statements) = do
     compile_statements(declared, statements, 0, len(statements))
 end;
 
+// compile_program_predeclaring also reserves a global for each given name, which
+// is how the loader supplies the FFI primitives (`__str_contains`, ...) a module
+// uses: the reference registers them as builtins before compiling.
+func compile_program_predeclaring(statements, names) = do
+    declared = predeclare_names(predeclare(new_state(), statements, 0, len(statements)), names, 0, len(names));
+    compile_statements(declared, statements, 0, len(statements))
+end;
+
+func predeclare_names(st, names, i, n) = match i >= n
+    true => st
+    false => predeclare_names(define_global(st, names[i]).st, names, i + 1, n);
+
 func predeclare(st, ss, i, n) = match i >= n
     true => st
     false => predeclare(predeclare_stmt(st, ss[i]), ss, i + 1, n);

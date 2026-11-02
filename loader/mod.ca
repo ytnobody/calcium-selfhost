@@ -16,6 +16,7 @@ namespace loader;
 use core.io!;
 use core.string;
 use core.array;
+use core.string;
 use ast;
 use lexer;
 use parser;
@@ -85,12 +86,13 @@ func load_one(path, source_dir, mods) = do
 end;
 
 func load_compiled(path, src, mods) = do
-    parsed = parser.parse_program(lexer.tokenize(src));
-    st = compiler.compile_program(parsed.statements);
+    toks = lexer.tokenize(src);
+    parsed = parser.parse_program(toks);
+    st = compiler.compile_program_predeclaring(parsed.statements, primitive_names(toks, []));
     match len(st.errors) > 0
         true => mods
         false => do
-            ran = vm.run_module(st.consts, st.code, mods);
+            ran = bind_primitives(st.globals, vm.run_module(st.consts, st.code, mods), 0, len(st.globals));
             // The whole array is stamped, not just the exported entries: a module
             // function that calls a sibling reads it back out of this array, and an
             // unstamped sibling would fall back to the caller's globals.
@@ -101,6 +103,27 @@ func load_compiled(path, src, mods) = do
             hash_set(keyed, path, exports_hash(st.globals, path, gs, 0, len(st.globals), {}))
         end
 end;
+
+// primitive_names collects the `__`-prefixed identifiers a module mentions.
+func primitive_names(toks, acc) = match lexer.first(toks)
+    Maybe.None => acc
+    Maybe.Some(t) => primitive_names(lexer.rest(toks), collect_primitive(t, acc));
+
+func collect_primitive(t, acc) = match t.kind == "IDENT" && string.starts_with(t.literal, "__")
+    true => push(acc, t.literal)
+    false => acc;
+
+// The reference's module loader registers the `__` primitives as builtins before
+// compiling a module; this compiler does not, so a name like `__str_contains`
+// becomes an ordinary global holding 0. Filling those slots with host functions
+// afterwards is enough: the code already reads them as globals.
+func bind_primitives(names, ran, i, n) = match i >= n
+    true => ran
+    false => bind_primitives(names, bind_one_primitive(names[i], ran), i + 1, n);
+
+func bind_one_primitive(entry, ran) = match string.starts_with(entry.name, "__")
+    true => vm.set_global_at(ran, entry.index, vm.HostFn(concat("prim:", entry.name)))
+    false => ran;
 
 // adopt_globals is applied to a whole array at once; see vm.adopt_globals.
 func stamp_globals(gs, id, i, n, acc) = match i >= n

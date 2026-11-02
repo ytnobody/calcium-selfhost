@@ -570,6 +570,9 @@ end;
 
 func set_globals(st, globals) = set_state(st, st.stack, st.top, st.frames, st.last, globals);
 
+// set_global_at writes one global slot, padding when the index is past the end.
+func set_global_at(st, index, value) = set_globals(st, put_at(st.globals, index, value));
+
 func op_get_free(st, ip) = do
     idx = read_u8(cl_body(frame_cl(current(st))), ip);
     done(advance(push_value(st, cl_free(frame_cl(current(st)))[idx]), ip))
@@ -1280,6 +1283,8 @@ func! host_apply(name, args) = match name
     "core.types:to_int" => host_ok(call_n(types.to_int, args))
     "core.types:to_float" => host_ok(call_n(types.to_float, args))
     "core.types:to_string" => host_ok(call_n(types.to_string, args))
+    "prim:__str_contains" => host_ok(call_n(string.contains, args))
+    "prim:__type_of" => host_ok(call_n(types.type_of, args))
     "core.bytes:to_bytes" => host_ok(call_n(bytes.to_bytes, args))
     "core.bytes:from_bytes" => host_ok(call_n(bytes.from_bytes, args))
     "core.bytes:byte_len" => host_ok(call_n(bytes.byte_len, args))

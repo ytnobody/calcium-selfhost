@@ -228,6 +228,9 @@ run_fmt() {
 vm_corpus() {
     find "$CALCIUM_LANG/examples" -name '*.ca' | sort
     find "$CALCIUM_LANG/tests" -name '*.test.ca' | sort
+    # The `test` module's own suite: it exercises the framework's helpers, which
+    # need the FFI primitives the loader now fills in.
+    echo "$CALCIUM_LANG/test/mod.test.ca"
 }
 
 vm_excluded() {
@@ -240,6 +243,9 @@ vm_excluded() {
         # no-match and exits 1, which is the behaviour we want to keep, so the two
         # differ on purpose.
         factorial.ca) return 0 ;;
+        # csv/mod.test.ca fails in both implementations, but the reference's message
+        # names its own source position; diagnostic text is not contractual.
+        mod.test.ca) [ "$(dirname "$1")" = "$CALCIUM_LANG/csv" ] && return 0 || return 1 ;;
         *) return 1 ;;
     esac
 }
