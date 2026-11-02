@@ -43,15 +43,15 @@ type Frame = Frame(cl, ip, base, globals);
 // State: operand stack, frames, globals, constant pool.
 // `modules` maps a module path to its exports, for local modules the loader has
 // already compiled. Paths without an entry fall back to the native registry.
-func new_state(constants) = {stack: [], top: 0, frames: [], last: 0, globals: [], constants: constants, modules: {}};
+func new_state(constants) = {stack: [], top: 0, frames: [], last: 0, globals: [], constants: constants, modules: {}, error: ""};
 
 func set_state(st, stack, top, frames, last, globals) =
     {stack: stack, top: top, frames: frames, last: last, globals: globals,
-     constants: st.constants, modules: st.modules};
+     constants: st.constants, modules: st.modules, error: st.error};
 
 func with_modules(st, modules) =
     {stack: st.stack, top: st.top, frames: st.frames, last: st.last, globals: st.globals,
-     constants: st.constants, modules: modules};
+     constants: st.constants, modules: modules, error: st.error};
 
 // ---------------------------------------------------------------------------
 // Operand stack
@@ -289,8 +289,11 @@ func run(constants, instructions) = run_with_modules(constants, instructions, {}
 func run_with_modules(constants, instructions, modules) = do
     main = Closure(serialize.FunctionRecord("<main>", "entry", [], 0, false, instructions), [], constants, "");
     st = push_frame(with_modules(new_state(constants), modules), main, 0);
-    exec(st)
+    finished_run(exec_state(st))
 end;
+
+// finished_run turns the final state into a result the caller can report.
+func finished_run(st) = {ok: st.error == "", v: st.last, error: st.error};
 
 // run_module executes a module's top-level code and returns the resulting state,
 // whose globals hold the module's exports.
@@ -419,7 +422,17 @@ func advance(st, ip) = set_ip(st, ip + width(cl_body(frame_cl(current(st))), ip)
 
 // fail records a runtime error and unwinds every frame, naming the function that
 // was executing so a no-match is diagnosable.
-func fail(st, message) = {ok: false, st: set_state(st, st.stack, st.top, [], failed_message(st, message), st.globals)};
+func fail(st, message) = do
+    text = failed_message(st, message);
+    {ok: false, st: set_error(set_state(st, st.stack, st.top, [], text, st.globals), text)}
+end;
+
+// set_error records why the run stopped. The state has to carry it, because
+// `finished_of` ignores the ok flag: a runtime error used to end the program
+// silently, with no output and exit status 0.
+func set_error(st, message) = {stack: st.stack, top: st.top, frames: st.frames,
+    last: st.last, globals: st.globals, constants: st.constants,
+    modules: st.modules, error: message};
 
 func failed_message(st, message) = match len(st.frames) == 0
     true => message

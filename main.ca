@@ -162,6 +162,15 @@ func! run_file(path) = match string.ends_with(path, ".bone")
     true => run_bone(path)
     false => run_source(path);
 
+// finish_run reports a runtime error and exits non-zero, the way a compile error
+// does. Without this the interpreter's error state was simply dropped.
+func! finish_run(r) = match r.ok
+    true => r.v
+    false => do
+        io.println(concat("runtime error: ", r.error));
+        os.exit(1)
+    end;
+
 // run_bone reads a compiled program. The format is normative in
 // specs/bone-format.md, and the reader lives next to the writer in `serialize`.
 // A .bone has no `use` statements left to read, so only the built-in modules
@@ -169,7 +178,7 @@ func! run_file(path) = match string.ends_with(path, ".bone")
 func! run_bone(path) = do
     prog = serialize.read_program(bytes.to_bytes(read_source(path)));
     match prog.ok
-        true => vm.run_with_modules(prog.constants, prog.instructions, {})
+        true => finish_run(vm.run_with_modules(prog.constants, prog.instructions, {}))
         false => io.println(concat(path, ": not a Calcium bytecode file"))
 end;
 
@@ -180,7 +189,7 @@ func! run_source(path) = do
     match len(st.errors) == 0
         true => do
             mods = loader.load_modules(parsed.statements, path);
-            vm.run_with_modules(st.consts, st.code, mods)
+            finish_run(vm.run_with_modules(st.consts, st.code, mods))
         end
         false => report_compile_errors(path, st.errors, 0, len(st.errors))
 end;

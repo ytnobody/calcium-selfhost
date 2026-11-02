@@ -234,6 +234,12 @@ vm_excluded() {
     case "$(basename "$1")" in
         async_*.ca|constraint.ca) return 0 ;;
         constraint.test.ca|function_constraint.test.ca|primitive_constraint.test.ca) return 0 ;;
+        # factorial.ca contains a `match n` whose arms are `0` and `true`; from n=1
+        # no arm matches. The reference stops after the first line and still exits 0
+        # because its VM drops the runtime error silently. The candidate reports the
+        # no-match and exits 1, which is the behaviour we want to keep, so the two
+        # differ on purpose.
+        factorial.ca) return 0 ;;
         *) return 1 ;;
     esac
 }
