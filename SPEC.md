@@ -50,6 +50,11 @@ boundary is explicit rather than accidental:
   static constraint checker (D13).
 - **Slow rather than missing:** `tco.test.ca` recurses 50000 deep; it passes, in
   about 40 s. See D19 for the measurement.
+- **Compiled programs can be run:** `run <file.bone>` reads the format back (the
+  reader mirrors the writer in `serialize/mod.ca`), so a program compiled once can
+  be executed later by either implementation. A `.bone` carries no `use` list, so
+  only the built-in modules resolve from a compiled file - local modules need the
+  source.
 
 SH-3 progress: the compiler emits .bone that behaves like the reference on every
 comparable corpus file (100 comparisons pass). Three files are excluded: two
