@@ -509,6 +509,7 @@ func compile_expr(st, e) = match e
     Expr.EMember(object, property) => compile_member(st, object, property)
     Expr.EEffectPipe(left, right, secret) => compile_effect_pipe(st, left, right)
     Expr.EPipe(left, right) => compile_pipe(st, left, right)
+    Expr.EErrorPipe(left, right) => compile_error_pipe(st, left, right)
     Expr.EInfix(op, left, right) => compile_infix(st, op, left, right)
     Expr.EArray(elements, is_concat) => compile_array(st, elements, is_concat)
     Expr.ETuple(elements) => compile_tuple(st, elements)
@@ -705,6 +706,29 @@ func compile_args(st, args, i, n) = match i >= n
 func compile_pipe(st, left, right) = match right
     Expr.ECall(fn, args) => compile_pipe_call(st, left, fn, args)
     Expr.EConstraintCheck(target) => compile_pipe_constraint(st, left, target)
+    _ => do
+        r = compile_callee(st, right);
+        l = compile_expr(r.st, left);
+        {e: ast.EWild, st: emit(l.st, bytecode.ins_u8(bytecode.call(), 1))}
+    end;
+
+// `value |>? f` calls f like `|>` does, then returns the failure from the
+// enclosing function or unwraps the success. The jump over the early return is
+// absolute, so it is patched once the return has been emitted.
+func compile_error_pipe(st, left, right) = do
+    called = compile_error_pipe_call(st, left, right);
+    dupd = emit(called.st, bytecode.ins(bytecode.dup()));
+    flagged = emit(dupd, bytecode.ins(bytecode.is_failure()));
+    jump_at = len(flagged.code);
+    jumped = emit(flagged, bytecode.ins_u16(bytecode.jump_if_false(), 0));
+    returned = emit(jumped, bytecode.ins(bytecode.ret()));
+    target = len(returned.code);
+    patched = with_code(returned, replace_range(returned.code, jump_at + 1, serialize.u16(target)));
+    {e: called.e, st: emit(patched, bytecode.ins(bytecode.unwrap()))}
+end;
+
+func compile_error_pipe_call(st, left, right) = match right
+    Expr.ECall(fn, args) => compile_pipe_call(st, left, fn, args)
     _ => do
         r = compile_callee(st, right);
         l = compile_expr(r.st, left);
