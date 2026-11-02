@@ -338,6 +338,10 @@ func step_op(st, f, code, ip) = match code[ip]
     bytecode.jump() => set_ip_at(st, f, read_u16(code, ip))
     bytecode.jump_if_false() => jump_if_in(st, f, code, ip, false)
     bytecode.jump_if_true() => jump_if_in(st, f, code, ip, true)
+    bytecode.call() => call_in(st, f, code, ip)
+    bytecode.call_effect() => call_in(st, f, code, ip)
+    bytecode.tail_call() => tail_call_in(st, f, code, ip)
+    bytecode.ret() => finished_of(op_ret(st, ip))
     bytecode.add() => binary_in(st, f, ip, numeric("add", lhs(st), rhs(st)))
     bytecode.sub() => binary_in(st, f, ip, numeric("sub", lhs(st), rhs(st)))
     bytecode.mul() => binary_in(st, f, ip, numeric("mul", lhs(st), rhs(st)))
@@ -367,6 +371,23 @@ func global_at(st, f, code, ip) = do
     match len(g) > 0
         true => stack_at(g, idx)
         false => stack_at(st.globals, idx)
+end;
+
+// call_in skips the generic advance: the caller already has the frame and the code.
+func call_in(st, f, code, ip) = do
+    nargs = code[ip + 1];
+    st1 = set_ip_at(st, f, ip + 2);
+    base = st1.top - nargs;
+    finished_of(apply(unwrap_callee(run_callee(st1, st1.stack[base - 1], base, nargs, false), st1)))
+end;
+
+func tail_call_in(st, f, code, ip) = do
+    nargs = code[ip + 1];
+    base = st.top - nargs;
+    r = unwrap_callee(run_callee(st, st.stack[base - 1], base, nargs, true), st);
+    match r.finished
+        true => finished_of(return_value(r.st, r.v))
+        false => r.st;
 end;
 
 func const_at(st, f, code, ip) = do
