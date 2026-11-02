@@ -316,7 +316,85 @@ func step_dispatch(st) = do
     ip = frame_ip(f);
     match ip >= len(code)
         true => finish(st)
-        false => finished_of(dispatch(st, code[ip], ip))
+        false => step_op(st, f, code, ip)
+end;
+
+// step_op handles the opcodes a hot loop spends its time in directly, so that the
+// ip change and the stack change land in a single state update. Everything else
+// goes through `dispatch`. Both paths mean the same thing; only the number of
+// intermediate states differs, which is what costs time here.
+func step_op(st, f, code, ip) = match code[ip]
+    bytecode.get_local() => push_and_next(st, f, ip, 2, stack_at(st.stack, frame_base(f) + code[ip + 1]))
+    bytecode.set_local() => set_local_in(st, f, code, ip)
+    bytecode.constant() => push_and_next(st, f, ip, 3, const_at(st, f, code, ip))
+    bytecode.get_global() => push_and_next(st, f, ip, 3, global_at(st, f, code, ip))
+    bytecode.dup() => push_and_next(st, f, ip, 1, stack_at(st.stack, st.top - 1))
+    bytecode.pop() => set_ip_at(set_state(st, st.stack, st.top - 1, st.frames, st.last, st.globals), f, ip + 1)
+    bytecode.jump() => set_ip_at(st, f, read_u16(code, ip))
+    bytecode.jump_if_false() => jump_if_in(st, f, code, ip, false)
+    bytecode.jump_if_true() => jump_if_in(st, f, code, ip, true)
+    bytecode.add() => binary_in(st, f, ip, numeric("add", lhs(st), rhs(st)))
+    bytecode.sub() => binary_in(st, f, ip, numeric("sub", lhs(st), rhs(st)))
+    bytecode.mul() => binary_in(st, f, ip, numeric("mul", lhs(st), rhs(st)))
+    bytecode.mod() => binary_in(st, f, ip, numeric("mod", lhs(st), rhs(st)))
+    bytecode.bit_and() => binary_in(st, f, ip, numeric("bit_and", lhs(st), rhs(st)))
+    bytecode.bit_or() => binary_in(st, f, ip, numeric("bit_or", lhs(st), rhs(st)))
+    bytecode.equal() => binary_in(st, f, ip, compare("equal", lhs(st), rhs(st)))
+    bytecode.not_equal() => binary_in(st, f, ip, compare("not_equal", lhs(st), rhs(st)))
+    bytecode.less() => binary_in(st, f, ip, compare("less", lhs(st), rhs(st)))
+    bytecode.greater() => binary_in(st, f, ip, compare("greater", lhs(st), rhs(st)))
+    bytecode.less_equal() => binary_in(st, f, ip, compare("less_equal", lhs(st), rhs(st)))
+    bytecode.greater_equal() => binary_in(st, f, ip, compare("greater_equal", lhs(st), rhs(st)))
+    _ => finished_of(dispatch(st, code[ip], ip));
+
+func lhs(st) = stack_at(st.stack, st.top - 2);
+func rhs(st) = stack_at(st.stack, st.top - 1);
+
+func binary_in(st, f, ip, v) = set_state(st,
+    put_at(st.stack, st.top - 2, v), st.top - 1,
+    replace_at(st.frames, 0, len(st.frames) - 1,
+        make_frame(frame_cl(f), ip + 1, frame_base(f), frame_globals(f)), []),
+    st.last, st.globals);
+
+func global_at(st, f, code, ip) = do
+    g = frame_globals(f);
+    idx = read_u16(code, ip);
+    match len(g) > 0
+        true => stack_at(g, idx)
+        false => stack_at(st.globals, idx)
+end;
+
+func const_at(st, f, code, ip) = do
+    pool = cl_consts(frame_cl(f));
+    constant_value(pool[read_u16(code, ip)], pool)
+end;
+
+func push_and_next(st, f, ip, w, v) = set_state(st,
+    put_at(st.stack, st.top, v), st.top + 1,
+    replace_at(st.frames, 0, len(st.frames) - 1,
+        make_frame(frame_cl(f), ip + w, frame_base(f), frame_globals(f)), []),
+    st.last, st.globals);
+
+func set_ip_at(st, f, ip) = set_state(st, st.stack, st.top,
+    replace_at(st.frames, 0, len(st.frames) - 1,
+        make_frame(frame_cl(f), ip, frame_base(f), frame_globals(f)), []),
+    st.last, st.globals);
+
+func set_local_in(st, f, code, ip) = set_state(st,
+    put_at(st.stack, frame_base(f) + code[ip + 1], stack_at(st.stack, st.top - 1)), st.top - 1,
+    replace_at(st.frames, 0, len(st.frames) - 1,
+        make_frame(frame_cl(f), ip + 2, frame_base(f), frame_globals(f)), []),
+    st.last, st.globals);
+
+func jump_if_in(st, f, code, ip, want_true) = do
+    v = stack_at(st.stack, st.top - 1);
+    jump = match v
+        true => want_true
+        false => !want_true;
+    target = match jump
+        true => read_u16(code, ip)
+        false => ip + 3;
+    set_ip_at(set_state(st, st.stack, st.top - 1, st.frames, st.last, st.globals), f, target)
 end;
 
 func finished_of(next) = match next.ok
