@@ -217,9 +217,10 @@ run_fmt() {
 #   *_constraint.test.ca
 #                  need the static checker as well (D13): they assert on the
 #                  reference's compile errors, whose text is not contractual.
-#   tco.test.ca    correct but far too slow: it recurses 50000 deep, and one
-#                  interpreted iteration costs ~0.75 ms (measured, linear), so the
-#                  case alone would exceed the harness timeout.
+#   tco.test.ca    runs: correct but slow. One interpreted iteration costs ~0.75 ms
+#                  (measured, linear; 20000 deep returns the right answer in 15 s),
+#                  so this case alone takes ~40 s. There is no timeout here, only
+#                  wall-clock cost, and dropping it would hide a real capability.
 #
 # tests/*.test.ca are included now that local modules load: the loader reads
 # `test/mod.ca`, compiles it with the self-hosted compiler and runs it on the same
@@ -233,7 +234,6 @@ vm_excluded() {
     case "$(basename "$1")" in
         async_*.ca|constraint.ca) return 0 ;;
         constraint.test.ca|function_constraint.test.ca|primitive_constraint.test.ca) return 0 ;;
-        tco.test.ca) return 0 ;;
         *) return 1 ;;
     esac
 }

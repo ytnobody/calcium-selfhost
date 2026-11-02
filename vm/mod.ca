@@ -62,7 +62,11 @@ func push_value(st, v) = set_state(st,
 // put_at writes at index i, padding with zeros when i is beyond the end. Writing
 // *past* the end matters: a global slot is allocated by index, and pushing would
 // put the value at the wrong index whenever an earlier slot is still unwritten.
-func put_at(arr, i, v) = match i < len(arr)
+func put_at(arr, i, v) = match i == len(arr)
+    true => push(arr, v)
+    false => put_at_slow(arr, i, v);
+
+func put_at_slow(arr, i, v) = match i < len(arr)
     true => replace_at(arr, 0, i, v, [])
     false => pad_and_push(arr, i, v);
 
@@ -98,15 +102,11 @@ func push_frame(st, cl, base) = set_state(st, st.stack, st.top,
 // from each closure) is what keeps a chain of sibling module calls on the right
 // unit: only the first call has a stamped closure.
 func entry_globals(st, cl) = do
-    match cl_mod(cl) != "" && len(module_globals(st, cl_mod(cl))) == 0
-        true => concat("NOGLOB ", cl_mod(cl)) !> io.say
-        false => 0;
-    entry_globals_1(st, cl)
+    id = cl_mod(cl);
+    match id == ""
+        true => caller_globals(st)
+        false => module_globals(st, id)
 end;
-
-func entry_globals_1(st, cl) = match cl_mod(cl) == ""
-    true => caller_globals(st)
-    false => module_globals(st, cl_mod(cl));
 
 func module_globals(st, id) = get(st.modules, globals_key(id), []);
 
