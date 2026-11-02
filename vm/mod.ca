@@ -35,7 +35,7 @@ type Value =
     AdtVal(type_name, tag, items) |
     HostFn(name);
 
-type Frame = Frame(cl, ip, base);
+type Frame = Frame(cl, ip, base, globals);
 
 // State: operand stack, frames, globals, constant pool.
 // `modules` maps a module path to its exports, for local modules the loader has
@@ -87,7 +87,21 @@ func peek(st) = st.stack[st.top - 1];
 func current(st) = st.frames[len(st.frames) - 1];
 
 func push_frame(st, cl, base) = set_state(st, st.stack, st.top,
-    push(st.frames, make_frame(cl, 0, base)), st.last, st.globals);
+    push(st.frames, make_frame(cl, 0, base, entry_globals(st, cl))), st.last, st.globals);
+
+// entry_globals decides which global array a new frame runs against. A closure
+// from another unit carries its own; one that does not - every closure created
+// while that unit was being built - inherits from the caller, which is the frame
+// that is already running that unit. Taking the array from the frame (instead of
+// from each closure) is what keeps a chain of sibling module calls on the right
+// unit: only the first call has a stamped closure.
+func entry_globals(st, cl) = match len(cl_globals(cl)) > 0
+    true => cl_globals(cl)
+    false => caller_globals(st);
+
+func caller_globals(st) = match len(st.frames) == 0
+    true => []
+    false => frame_globals(current(st));
 
 func pop_frame(st) = set_state(st, st.stack, st.top,
     take(st.frames, 0, len(st.frames) - 1, []), st.last, st.globals);
@@ -101,22 +115,26 @@ func set_frame(st, f) = set_state(st, st.stack, st.top,
 
 // A Frame is an ADT, so its fields are destructured.
 func frame_cl(f) = match f
-    Frame.Frame(cl, ip, base) => cl
+    Frame.Frame(cl, ip, base, globals) => cl
     _ => Closure(serialize.FunctionRecord("", "entry", [], 0, false, []), [], [], []);
 
 func frame_ip(f) = match f
-    Frame.Frame(cl, ip, base) => ip
+    Frame.Frame(cl, ip, base, globals) => ip
     _ => 0;
 
 func frame_base(f) = match f
-    Frame.Frame(cl, ip, base) => base
+    Frame.Frame(cl, ip, base, globals) => base
     _ => 0;
 
-func make_frame(cl, ip, base) = Frame(cl, ip, base);
+func make_frame(cl, ip, base, globals) = Frame(cl, ip, base, globals);
+
+func frame_globals(f) = match f
+    Frame.Frame(cl, ip, base, globals) => globals
+    _ => [];
 
 func set_ip(st, ip) = do
     f = current(st);
-    set_frame(st, make_frame(frame_cl(f), ip, frame_base(f)))
+    set_frame(st, make_frame(frame_cl(f), ip, frame_base(f), frame_globals(f)))
 end;
 
 // ---------------------------------------------------------------------------
@@ -448,7 +466,7 @@ end;
 func op_get_global(st, ip) = do
     cl = frame_cl(current(st));
     idx = read_u16(cl_body(cl), ip);
-    g = cl_globals(cl);
+    g = frame_globals(current(st));
     value = match len(g) > 0
         true => stack_at(g, idx)
         false => stack_at(st.globals, idx);
@@ -644,7 +662,7 @@ func tail_frame(st, callee, args_base, nargs) = do
     moved = copy_down(st.stack, args_base, fbase, nargs);
     top = fbase + cl_locals(callee);
     set_state(st, ensure_size(moved, top), top,
-        replace_at(st.frames, 0, len(st.frames) - 1, make_frame(callee, 0, fbase), []),
+        replace_at(st.frames, 0, len(st.frames) - 1, make_frame(callee, 0, fbase, entry_globals(st, callee)), []),
         st.last, st.globals)
 end;
 
@@ -887,7 +905,7 @@ func push_values(st, values, i, n) = match i >= n
 func start_frame(st, fn, base) = do
     locals_count = cl_locals(fn);
     top = base + locals_count;
-    set_state(st, ensure_size(st.stack, top), top, push(st.frames, make_frame(fn, 0, base)), st.last, st.globals)
+    set_state(st, ensure_size(st.stack, top), top, push(st.frames, make_frame(fn, 0, base, entry_globals(st, fn))), st.last, st.globals)
 end;
 
 func run_until(st, target) = match len(st.frames) <= target

@@ -609,7 +609,7 @@ func is_maybe(object) = match object
     _ => false;
 
 func compile_maybe_member(st, property) = match property
-    "None" => compile_const(st, serialize.CAdt("Maybe", "Maybe.None", []))
+    "None" => {e: ast.EWild, st: emit(st, bytecode.ins(bytecode.none()))}
     "Some" => compile_const(st, serialize.CFunc(maybe_some_record()))
     _ => compile_member_access(st, ast.EIdent("Maybe"), property);
 
