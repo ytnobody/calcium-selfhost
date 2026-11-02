@@ -86,6 +86,12 @@ lint_self() {
 corpus_files() {
     local dirs=("$CORPUS/examples" "$CORPUS/tests")
     [[ -d "$CORPUS/csv" ]] && dirs+=("$CORPUS/csv")
+    # The stdlib sources are the densest Calcium in the repository; lexing and
+    # formatting them compares against the reference like any other file. The
+    # stages that need a runnable program skip them (the reference's top-level
+    # compiler does not see the `__` primitives).
+    [[ -d "$CORPUS/test" ]] && dirs+=("$CORPUS/test")
+    [[ -d "$CORPUS/pkg/vm/stdlib" ]] && dirs+=("$CORPUS/pkg/vm/stdlib")
     local f
     for f in $(find "${dirs[@]}" -name '*.ca' 2>/dev/null | sort); do
         if [[ -n "$FILTER" ]] && ! [[ "$f" =~ $FILTER ]]; then
@@ -159,7 +165,8 @@ run_lex() {
         out_cand="$WORK/lex-cand-$(basename "$f")"
 
         if ! "$ORACLE" lex "$f" </dev/null >"$out_oracle" 2>&1; then
-            skip=$((skip + 1))
+            # A per-file exclusion, not a skipped stage.
+            excluded=$((excluded + 1))
             continue
         fi
         if ! candidate lex "$f" </dev/null >"$out_cand" 2>&1; then
@@ -189,10 +196,12 @@ run_fmt() {
         base=$(basename "$f")
         out_oracle="$WORK/oracle-$base"
         out_cand="$WORK/cand-$base"
-        cp "$f" "$out_oracle" 2>/dev/null || { skip=$((skip + 1)); continue; }
+        cp "$f" "$out_oracle" 2>/dev/null || { excluded=$((excluded + 1)); continue; }
 
         if ! "$ORACLE" fmt "$out_oracle" >/dev/null 2>&1; then
-            skip=$((skip + 1))   # oracle itself cannot format it; not our problem
+            # The oracle cannot format it (a file it cannot parse); a per-file
+            # exclusion, not a skipped stage.
+            excluded=$((excluded + 1))
             continue
         fi
         if ! candidate fmt "$f" -o "$out_cand" >"$WORK/fmt.err" 2>&1; then
