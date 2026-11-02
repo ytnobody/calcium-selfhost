@@ -22,6 +22,7 @@ use core.io!;
 use core.math;
 use core.regex;
 use core.json;
+use core.bytes;
 use core.time;
 use core.array;
 use bytecode;
@@ -210,6 +211,7 @@ func module_member(path, name) = match path
     "core.types" => HostFn(concat("core.types:", name))
     "core.regex" => HostFn(concat("core.regex:", name))
     "core.json" => HostFn(concat("core.json:", name))
+    "core.bytes" => HostFn(concat("core.bytes:", name))
     "core.time" => time_member(name)
     _ => HostFn("unsupported-module:");
 
@@ -1265,6 +1267,12 @@ func! host_apply(name, args) = match name
     "core.types:to_int" => host_ok(call_n(types.to_int, args))
     "core.types:to_float" => host_ok(call_n(types.to_float, args))
     "core.types:to_string" => host_ok(call_n(types.to_string, args))
+    "core.bytes:to_bytes" => host_ok(call_n(bytes.to_bytes, args))
+    "core.bytes:from_bytes" => host_ok(call_n(bytes.from_bytes, args))
+    "core.bytes:byte_len" => host_ok(call_n(bytes.byte_len, args))
+    "core.bytes:char_count" => host_ok(call_n(bytes.char_count, args))
+    "core.bytes:from_int" => host_ok(call_n(bytes.from_int, args))
+    "core.bytes:from_float" => host_ok(call_n(bytes.from_float, args))
     "core.json:parse" => host_ok(call_n(json.parse, args))
     "core.json:stringify" => host_ok(call_n(json.stringify, args))
     "core.json:decode" => host_ok(call_n(json.decode, args))

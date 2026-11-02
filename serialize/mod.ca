@@ -136,3 +136,138 @@ func encode_constants(cs, i, n, acc) = match i >= n
 // to_string_bytes turns the encoded bytes back into a string, which is what
 // gets written to disk.
 func to_string_bytes(bs) = bytes.from_bytes(bs);
+
+// ---------------------------------------------------------------------------
+// Reading
+//
+// The reader mirrors the writer above. A .bone file is the only input the
+// self-hosted toolchain cannot produce itself, so `run <file.bone>` needs this.
+// ---------------------------------------------------------------------------
+
+// read_program parses the header and body; `ok` is false when the magic or the
+// version does not match, which is how a wrong file is reported.
+func read_program(bs) = match len(bs) < 10 || !has_magic(bs)
+    true => {ok: false, constants: [], instructions: []}
+    false => read_body(bs, 6);
+
+func has_magic(bs) = bs[0] == 67 && bs[1] == 65 && bs[2] == 76 && bs[3] == 66;
+
+func read_body(bs, i) = do
+    nconstants = rd_u32(bs, i);
+    cs = rd_constants(bs, i + 4, nconstants, []);
+    total = rd_u32(bs, cs.i);
+    {ok: true, constants: cs.items, instructions: slice(bs, cs.i + 4, cs.i + 4 + total)}
+end;
+
+func slice(arr, from, to) = slice_into(arr, from, to, []);
+
+func slice_into(arr, from, to, acc) = match from >= to || from >= len(arr)
+    true => acc
+    false => slice_into(arr, from + 1, to, push(acc, arr[from]));
+
+func rd_u32(bs, i) = bs[i] * 16777216 + bs[i + 1] * 65536 + bs[i + 2] * 256 + bs[i + 3];
+
+// rd_i64 rebuilds a two's-complement 64-bit integer. The top byte is signed so the
+// running value stays inside a Calcium int.
+func rd_i64(bs, i) = rd_i64_from(bs, i, signed_byte(bs[i]), 1);
+
+func signed_byte(b) = match b >= 128
+    true => b - 256
+    false => b;
+
+func rd_i64_from(bs, i, acc, k) = match k >= 8
+    true => acc
+    false => rd_i64_from(bs, i, acc * 256 + bs[i + k], k + 1);
+
+// rd_f64 rebuilds an IEEE-754 double from sign, exponent and mantissa, because the
+// FFI has no "bytes to float" primitive. Subnormals are handled; infinities and
+// NaN fall back to 0.0, which no corpus constant needs.
+func rd_f64(bs, i) = do
+    exp = (bs[i] & 127) * 16 + (bs[i + 1] >> 4);
+    mant = rd_mantissa(bs, i);
+    magnitude = match exp == 0
+        true => mant / 4503599627370496.0 * pow2(-1022)
+        false => (1.0 + mant / 4503599627370496.0) * pow2(exp - 1023);
+    apply_sign((bs[i] >> 7) & 1, magnitude)
+end;
+
+func apply_sign(negative, magnitude) = match negative == 1
+    true => 0.0 - magnitude
+    false => magnitude;
+
+func rd_mantissa(bs, i) = rd_mantissa_from(bs, i, bs[i + 1] & 15, 2);
+
+func rd_mantissa_from(bs, i, acc, k) = match k >= 8
+    true => acc
+    false => rd_mantissa_from(bs, i, acc * 256 + bs[i + k], k + 1);
+
+func pow2(n) = match n >= 0
+    true => pow2_up(2.0, n, 1.0)
+    false => 1.0 / pow2_up(2.0, 0 - n, 1.0);
+
+func pow2_up(base, n, acc) = match n <= 0
+    true => acc
+    false => pow2_up(base, n - 1, acc * base);
+
+func rd_str(bs, i) = do
+    n = rd_u32(bs, i);
+    {s: bytes.from_bytes(slice(bs, i + 4, i + 4 + n)), i: i + 4 + n}
+end;
+
+func rd_constant(bs, i) = do
+    tag = bs[i];
+    rest = i + 1;
+    rd_constant_tag(bs, tag, rest)
+end;
+
+func rd_constant_tag(bs, tag, rest) = match tag
+        _TAG_BOOL => {c: CBool(bs[rest] == 1), i: rest + 1}
+        _TAG_INT => {c: CInt(rd_i64(bs, rest)), i: rest + 8}
+        _TAG_FLOAT => {c: CFloat(rd_f64(bs, rest)), i: rest + 8}
+        _TAG_STRING => do
+            s1 = rd_str(bs, rest);
+            {c: CStr(s1.s), i: s1.i}
+        end
+        _TAG_FUNCTION => do
+            f1 = rd_function(bs, rest);
+            {c: CFunc(f1.r), i: f1.i}
+        end
+        _TAG_REGEX => do
+            p2 = rd_str(bs, rest);
+            f2 = rd_str(bs, p2.i);
+            {c: CRegex(p2.s, f2.s), i: f2.i}
+        end
+        _TAG_ADT => do
+            t3 = rd_str(bs, rest);
+            n3 = rd_str(bs, t3.i);
+            i3 = rd_constants(bs, n3.i + 4, rd_u32(bs, n3.i), []);
+            {c: CAdt(t3.s, n3.s, i3.items), i: i3.i}
+        end
+        _ => {c: CInt(0), i: len(bs)};
+
+func rd_constants(bs, i, n, acc) = match n <= 0
+    true => {items: acc, i: i}
+    false => do
+        r = rd_constant(bs, i);
+        rd_constants(bs, r.i, n - 1, push(acc, r.c))
+    end;
+
+func rd_function(bs, i) = do
+    name = rd_str(bs, i);
+    modid = rd_str(bs, name.i);
+    nparams = rd_u32(bs, modid.i);
+    ps = rd_params(bs, modid.i + 4, nparams, []);
+    locals = rd_u32(bs, ps.i);
+    effect = bs[ps.i + 4];
+    blen = rd_u32(bs, ps.i + 5);
+    body = slice(bs, ps.i + 9, ps.i + 9 + blen);
+    {r: FunctionRecord(name.s, modid.s, ps.items, locals, effect == 1, body),
+     i: ps.i + 9 + blen}
+end;
+
+func rd_params(bs, i, n, acc) = match n <= 0
+    true => {items: acc, i: i}
+    false => do
+        r = rd_str(bs, i);
+        rd_params(bs, r.i, n - 1, push(acc, r.s))
+    end;

@@ -2,6 +2,7 @@ use core.io!;
 use core.os!;
 use core.string;
 use core.array;
+use core.bytes;
 use lexer;
 use parser;
 use formatter;
@@ -157,7 +158,22 @@ end;
 // (`use test;`) are loaded here rather than by the host: the loader reads the
 // module source, compiles it with the self-hosted compiler, runs its top-level
 // code on the same VM, and exposes its globals as the module's exports.
-func! run_file(path) = do
+func! run_file(path) = match string.ends_with(path, ".bone")
+    true => run_bone(path)
+    false => run_source(path);
+
+// run_bone reads a compiled program. The format is normative in
+// specs/bone-format.md, and the reader lives next to the writer in `serialize`.
+// A .bone has no `use` statements left to read, so only the built-in modules
+// resolve; local ones need the source.
+func! run_bone(path) = do
+    prog = serialize.read_program(bytes.to_bytes(read_source(path)));
+    match prog.ok
+        true => vm.run_with_modules(prog.constants, prog.instructions, {})
+        false => io.println(concat(path, ": not a Calcium bytecode file"))
+end;
+
+func! run_source(path) = do
     src = read_source(path)
     parsed = parser.parse_program(lexer.tokenize(src))
     st = compiler.compile_program(parsed.statements)
