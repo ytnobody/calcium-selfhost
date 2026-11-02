@@ -7,7 +7,7 @@ stream and the formatter's output match the reference byte for byte; the
 compiler's output behaves identically on every comparable corpus file; the
 interpreter runs the compiled programs, including every suite file that matches the
 reference line for line; and `run <file.bone>` reads the compiled format back. The harness reports
-`142 passed, 0 skipped, 22 excluded` - the exclusions are the three
+`226 passed, 0 skipped, 36 excluded` - the exclusions are the three
 static-constraint suites (out of scope by decision, `docs/DECISIONS.md` D13).
 See `SPEC.md` for the stage plan and D19 for the one file that is slow.
 

@@ -244,7 +244,20 @@ SH-3 note: `constraint.ca` is excluded from the compile stage for the adjacent
 reason — the reference rejects it with a static-constraint error, and that
 checker is the piece that is not implemented.
 
-## D15 — Parse errors are not reported by the candidate parser (open)
+## D15 — Parse errors: the invalid unary plus (**done**)
+
+`core/io.ca` uses `++`, which both lexers split into two `+` tokens. The reference
+rejects the file; this parser read `a ++ b` as `a + (+b)` and said nothing, so
+`check` reported `0 finding(s)` where the reference reports `parse errors`.
+
+Calcium has no unary plus, so a `+` in an operand position is precisely the invalid
+case. The token stream is scanned for it before the checker runs (`bad_unary_plus`
+in `main.ca`) and `check` prints the reference's shape. A full parser-level error
+channel is still not threaded through - a construct that fails to *parse* but still
+produces an AST is reported, rather than every malformed token being diagnosed.
+
+Original note:
+
 
 `typechecker`'s `check` command reports `parse errors` for a file the reference
 parser rejects, and the candidate is more permissive: `pkg/vm/stdlib/core/io.ca`
