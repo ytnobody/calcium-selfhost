@@ -317,6 +317,20 @@ read has to yield the value rather than a function, so those are special-cased.
 `call_n` dispatched at most four arguments, which silently turned every larger
 host call into `failure("too many arguments")`; it now covers eight.
 
+## D22 — `Secret.with` is not supported, deliberately (**accepted**)
+
+The construct is syntactically valid and the reference compiles it, but *no
+Calcium program can reach it*: `OpSecretWithBegin` pops a value that must be a
+`SecretCapability`, and nothing in the language produces one (the primitives that
+create capabilities are not exposed; no file in the repository mentions
+`Secret.with`). Running one in the reference gives
+`runtime error: Secret.with: expected a SecretCapability, got int`.
+
+Implementing parser, compiler and VM support would therefore be unverifiable — no
+program exists to compare. The compiler reports `unsupported expression` for it
+instead, which is the safe failure this project settled on after D14's silent
+`do`-block bug: a construct either compiles correctly or says it cannot.
+
 ## D20 — Runtime errors are reported, not dropped (**done**)
 
 The interpreter's dispatch ignored the ok flag on every step, so a `fail` - a
