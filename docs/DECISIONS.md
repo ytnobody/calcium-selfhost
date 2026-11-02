@@ -304,6 +304,30 @@ read has to yield the value rather than a function, so those are special-cased.
 `call_n` dispatched at most four arguments, which silently turned every larger
 host call into `failure("too many arguments")`; it now covers eight.
 
+## D20 — Runtime errors are reported, not dropped (**done**)
+
+The interpreter's dispatch ignored the ok flag on every step, so a `fail` - a
+no-match, or a type error raised by the host - emptied the frames and the run just
+stopped: no message, exit status 0. `test/mod.test.ca` "passed" that way while
+silently truncating.
+
+The state now carries `error`, set by `fail`; `run_with_modules` returns
+`{ok, v, error}` and the CLI prints `runtime error: ...` and exits 1, like a
+compile error. `examples/factorial.ca` is excluded from the VM and .bone stages as
+a consequence: its `match n` arms are `0` and `true`, so nothing matches from n=1,
+and the reference stops after the first line *silently*.
+
+## D21 — The FFI primitives a module names are filled in by the loader (**done**)
+
+The reference registers `__str_contains` and friends as builtins before compiling
+a module. This compiler has no such table, so those names compiled to nothing and
+the call went to whatever was on the stack. The loader now collects the
+`__`-prefixed identifiers from the module's tokens, reserves a global for each, and
+fills the slots with host functions the VM forwards.
+
+`test/mod.test.ca` (the framework's own suite: `like`, `unlike`, `cmp_ok`,
+`is_type`) matches the reference as a result.
+
 ## D19 — Interpretation is slow, and that is a measured limit, not a TODO (**accepted**)
 
 One interpreted iteration of a tail-recursive count costs ~0.74 ms (1000 → 0.86 s,
