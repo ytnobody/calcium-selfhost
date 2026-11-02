@@ -214,16 +214,26 @@ run_fmt() {
 #                  the open question D2; the interpreter does not attempt it.
 #   constraint.ca  needs the static constraint checker (D13).
 #
-# The stage is limited to examples/: the tests/*.test.ca files import the local
-# `test` module, and loading a local module is a host facility the interpreter
-# cannot reach (`use` names are resolved by the reference loader, not by Calcium).
+#   *_constraint.test.ca
+#                  need the static checker as well (D13): they assert on the
+#                  reference's compile errors, whose text is not contractual.
+#   tco.test.ca    correct but far too slow: it recurses 50000 deep, and one
+#                  interpreted iteration costs ~0.75 ms (measured, linear), so the
+#                  case alone would exceed the harness timeout.
+#
+# tests/*.test.ca are included now that local modules load: the loader reads
+# `test/mod.ca`, compiles it with the self-hosted compiler and runs it on the same
+# VM, so `use test;` resolves the same way it does for the reference.
 vm_corpus() {
     find "$CALCIUM_LANG/examples" -name '*.ca' | sort
+    find "$CALCIUM_LANG/tests" -name '*.test.ca' | sort
 }
 
 vm_excluded() {
     case "$(basename "$1")" in
         async_*.ca|constraint.ca) return 0 ;;
+        constraint.test.ca|function_constraint.test.ca|primitive_constraint.test.ca) return 0 ;;
+        tco.test.ca) return 0 ;;
         *) return 1 ;;
     esac
 }
