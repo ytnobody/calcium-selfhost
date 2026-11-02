@@ -20,6 +20,7 @@ func implemented() = true;
 use core.array;
 use core.string;
 use core.types;
+use core.io!;
 use ast;
 use bytecode;
 use serialize;
@@ -347,11 +348,24 @@ end;
 
 // mark_tail rewrites a trailing OpCall into OpTailCall. A call in tail position
 // must reuse the frame, otherwise a deep recursion grows the stack to the frame
-// limit. OpCall is two bytes (opcode + argument count), so the opcode to rewrite
-// sits at len-2.
-func mark_tail(st) = match len(st.code) >= 2 && st.code[len(st.code) - 2] == bytecode.call()
-    true => with_code(st, replace_range(st.code, len(st.code) - 2, [bytecode.tail_call()]))
-    false => st;
+// limit.
+//
+// The last instruction is found by walking the stream rather than by looking at
+// the last two bytes: an operand byte can equal the Call opcode, and a constant
+// index of 26 (which is what `0` became in `x % 2 == 0`) was rewritten into a
+// tail call, corrupting the constant reference.
+func mark_tail(st) = do
+    at = last_start(st.code, 0, len(st.code));
+    match at + 1 < len(st.code) && st.code[at] == bytecode.call()
+        true => with_code(st, replace_range(st.code, at, [bytecode.tail_call()]))
+        false => st
+end;
+
+func last_start(code, ip, n) = match ip + width_of(code, ip) >= n
+    true => ip
+    false => last_start(code, ip + width_of(code, ip), n);
+
+func width_of(code, ip) = bytecode.operand_bytes(code[ip]) + 1;
 
 // A top-level assignment binds a global; inside a function it binds a local, as
 // the reference does. Variables are immutable, so a name is bound once.

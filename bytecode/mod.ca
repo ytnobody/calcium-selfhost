@@ -205,3 +205,36 @@ func ins_u16_u8(op, a, b) = [op, (a >> 8) & 255, a & 255, b];
 // and 8-bit operands occupies, including the opcode.
 func width(n_u16, n_u8) = 1 + n_u16 * 2 + n_u8;
 
+// operand_bytes is how many operand bytes an opcode carries; the reference
+// format does not encode widths, so every walker needs this table.
+func operand_bytes(op) = match op
+    closure() => 3
+    construct_adt() => 3
+    match_adt() => 3
+    constant() => 2
+    get_global() => 2
+    set_global() => 2
+    get_member() => 2
+    load_module() => 2
+    array() => 2
+    array_concat() => 2
+    tuple() => 2
+    hash_lit() => 2
+    jump() => 2
+    jump_if_false() => 2
+    jump_if_true() => 2
+    unwrap_or_jump() => 2
+    and() => 2
+    or() => 2
+    stay_begin() => 2
+    stay_get_state() => 2
+    continue_() => 2
+    check_secret_capability() => 2
+    get_local() => 1
+    set_local() => 1
+    get_free() => 1
+    call() => 1
+    tail_call() => 1
+    call_effect() => 1
+    builtin() => 1
+    _ => 0;

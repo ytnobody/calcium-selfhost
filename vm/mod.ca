@@ -141,13 +141,16 @@ end;
 // Constants
 // ---------------------------------------------------------------------------
 
-func constant_value(c) = match c
+// A constant is turned into a value against the pool of the unit it came from: a
+// function constant's body was compiled with that pool's indices, so the closure
+// it becomes has to carry the same pool.
+func constant_value(c, pool) = match c
     Constant.CBool(v) => v
     Constant.CInt(v) => v
     Constant.CFloat(v) => v
     Constant.CStr(v) => v
-    Constant.CAdt(name, tag, items) => AdtVal(name, tag, map_constants(items, 0, len(items), []))
-    Constant.CFunc(record) => Closure(record, [], select_constants(record), [])
+    Constant.CAdt(name, tag, items) => AdtVal(name, tag, map_constants(items, pool, 0, len(items), []))
+    Constant.CFunc(record) => Closure(record, [], pool, [])
     Constant.CRegex(pattern, flags) => compile_regex(pattern, flags)
     _ => 0;
 
@@ -158,9 +161,9 @@ func compile_regex(pattern, flags) = regex.compile(pattern, flags) !? {
     failure(e) => pattern
 };
 
-func map_constants(items, i, n, acc) = match i >= n
+func map_constants(items, pool, i, n, acc) = match i >= n
     true => acc
-    false => map_constants(items, i + 1, n, push(acc, constant_value(items[i])));
+    false => map_constants(items, pool, i + 1, n, push(acc, constant_value(items[i], pool)));
 
 // ---------------------------------------------------------------------------
 // Instruction encoding
@@ -174,31 +177,7 @@ func read_u8(code, ip) = code[ip + 1];
 // not encode; it comes from the opcode's operand layout.
 func width(code, ip) = operand_bytes(code[ip]) + 1;
 
-func operand_bytes(op) = match op
-    bytecode.closure() => 3
-    bytecode.construct_adt() => 3
-    bytecode.match_adt() => 3
-    bytecode.constant() => 2
-    bytecode.get_global() => 2
-    bytecode.set_global() => 2
-    bytecode.get_member() => 2
-    bytecode.load_module() => 2
-    bytecode.array() => 2
-    bytecode.array_concat() => 2
-    bytecode.tuple() => 2
-    bytecode.hash_lit() => 2
-    bytecode.jump() => 2
-    bytecode.jump_if_false() => 2
-    bytecode.jump_if_true() => 2
-    bytecode.unwrap_or_jump() => 2
-    bytecode.get_local() => 1
-    bytecode.set_local() => 1
-    bytecode.get_free() => 1
-    bytecode.call() => 1
-    bytecode.tail_call() => 1
-    bytecode.call_effect() => 1
-    bytecode.builtin() => 1
-    _ => 0;
+func operand_bytes(op) = bytecode.operand_bytes(op);
 
 // ---------------------------------------------------------------------------
 // Modules
@@ -313,7 +292,9 @@ func exec(st) = match len(st.frames) == 0
     true => st.last
     false => exec(step(st));
 
-func step(st) = do
+func step(st) = step_dispatch(st);
+
+func step_dispatch(st) = do
     f = current(st);
     code = cl_body(frame_cl(f));
     ip = frame_ip(f);
@@ -425,12 +406,11 @@ end;
 func op_constant(st, ip) = do
     cl = frame_cl(current(st));
     pool = cl_consts(cl);
-    done(advance(push_value(st, constant_value(pool[read_u16(cl_body(cl), ip)])), ip))
+    done(advance(push_value(st, constant_value(pool[read_u16(cl_body(cl), ip)], pool)), ip))
 end;
 
 // A closure created inside a unit shares that unit's pool; only the top-level
 // closure of a module differs, and its pool is the module's.
-func select_constants(record) = [];
 
 func op_pop(st, ip) = done(advance(pop_value(st).st, ip));
 
