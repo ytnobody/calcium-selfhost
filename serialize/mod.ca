@@ -7,6 +7,10 @@
 
 namespace serialize;
 
+// implemented marks this component as usable; the harness reads it before running
+// a stage that needs it.
+func implemented() = true;
+
 use core.array;
 use core.bytes;
 

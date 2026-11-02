@@ -348,6 +348,51 @@ run_compile() {
     done
 }
 
+# --- Stage: .bone round trip --------------------------------------------------
+# A program compiled by the candidate has to be readable by the candidate. This
+# compiles each supported example, reads the .bone back and compares the run with
+# the reference executing the source - so it covers the writer and the reader.
+run_bone() {
+    if ! have_component vm || ! have_component serialize; then
+        echo "skip bone (serialize/vm not implemented)"
+        skip=$((skip + 1))
+        return 0
+    fi
+    local files f out_oracle out_cand st_oracle st_cand
+    out_oracle="$WORK/bone-oracle.out"
+    out_cand="$WORK/bone-cand.out"
+    # Examples only: a .bone carries no `use` list, so a program that needs a local
+    # module cannot be re-resolved from the compiled form.
+    mapfile -t files < <(find "$CALCIUM_LANG/examples" -name '*.ca' | sort)
+    for f in "${files[@]}"; do
+        if vm_excluded "$f"; then
+            excluded=$((excluded + 1))
+            continue
+        fi
+        ( cd "$CALCIUM_LANG" && "$ORACLE" "$f" ) >"$out_oracle" 2>&1
+        st_oracle=$?
+        if [[ $st_oracle -ne 0 ]]; then
+            excluded=$((excluded + 1))
+            continue
+        fi
+        candidate compile "$f" -o "$WORK/one.bone" >/dev/null 2>&1
+        candidate run "$WORK/one.bone" </dev/null >"$out_cand" 2>&1
+        st_cand=$?
+        if [[ $st_oracle -ne $st_cand ]]; then
+            {
+                echo "exit status: oracle=$st_oracle candidate=$st_cand"
+                echo "--- oracle output ---"; head -20 "$out_oracle"
+                echo "--- candidate output ---"; head -20 "$out_cand"
+            } >"$WORK/bone.diff"
+            fail_case "bone: $f" "$WORK/bone.diff"
+        elif diff -u "$out_oracle" "$out_cand" >"$WORK/bone.diff" 2>&1; then
+            pass=$((pass + 1))
+        else
+            fail_case "bone: $f" "$WORK/bone.diff"
+        fi
+    done
+}
+
 # --- Main ---------------------------------------------------------------------
 
 echo "reference: $CALCIUM_LANG"
@@ -361,6 +406,7 @@ run_lex
 run_fmt
 run_compile
 run_vm
+run_bone
 
 echo
 if [[ $fail -eq 0 ]]; then
