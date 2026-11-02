@@ -21,6 +21,8 @@ use core.types;
 use core.io!;
 use core.math;
 use core.regex;
+use core.json;
+use core.time;
 use core.array;
 use bytecode;
 use serialize;
@@ -207,6 +209,8 @@ func module_member(path, name) = match path
     "core.math" => HostFn(concat("core.math:", name))
     "core.types" => HostFn(concat("core.types:", name))
     "core.regex" => HostFn(concat("core.regex:", name))
+    "core.json" => HostFn(concat("core.json:", name))
+    "core.time" => time_member(name)
     _ => HostFn("unsupported-module:");
 
 func io_member(name) = match name
@@ -753,6 +757,16 @@ func member_name(cl, idx) = match cl_consts(cl)[idx]
     Constant.CStr(v) => v
     _ => "";
 
+// time_member exposes core.time's unit constants as values, since a member read
+// has to yield the value itself rather than a function.
+func time_member(name) = match name
+    "second" => 1
+    "minute" => 60
+    "hour" => 3600
+    "day" => 86400
+    "week" => 604800
+    _ => HostFn(concat("core.time:", name));
+
 func member_of(obj, name) = match types.is_hash(obj)
     true => module_or_hash(obj, name)
     false => obj;
@@ -1073,6 +1087,10 @@ func call_n(f, args) = match len(args)
     2 => f(args[0], args[1])
     3 => f(args[0], args[1], args[2])
     4 => f(args[0], args[1], args[2], args[3])
+    5 => f(args[0], args[1], args[2], args[3], args[4])
+    6 => f(args[0], args[1], args[2], args[3], args[4], args[5])
+    7 => f(args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+    8 => f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
     _ => failure("too many arguments");
 
 func result_record(v) = match types.is_hash(v)
@@ -1169,6 +1187,37 @@ func! host_apply(name, args) = match name
     "core.types:to_int" => host_ok(call_n(types.to_int, args))
     "core.types:to_float" => host_ok(call_n(types.to_float, args))
     "core.types:to_string" => host_ok(call_n(types.to_string, args))
+    "core.json:parse" => host_ok(call_n(json.parse, args))
+    "core.json:stringify" => host_ok(call_n(json.stringify, args))
+    "core.json:decode" => host_ok(call_n(json.decode, args))
+    "core.json:encode" => host_ok(call_n(json.encode, args))
+    "core.time:now" => host_ok(call_n(time.now, args))
+    "core.time:now_ms" => host_ok(call_n(time.now_ms, args))
+    "core.time:format" => host_ok(call_n(time.format, args))
+    "core.time:format_tz" => host_ok(call_n(time.format_tz, args))
+    "core.time:parse" => host_ok(call_n(time.parse, args))
+    "core.time:parse_tz" => host_ok(call_n(time.parse_tz, args))
+    "core.time:components" => host_ok(call_n(time.components, args))
+    "core.time:components_tz" => host_ok(call_n(time.components_tz, args))
+    "core.time:from_components" => host_ok(call_n(time.from_components, args))
+    "core.time:from_components_tz" => host_ok(call_n(time.from_components_tz, args))
+    "core.time:add" => host_ok(call_n(time.add, args))
+    "core.time:add_minutes" => host_ok(call_n(time.add_minutes, args))
+    "core.time:add_hours" => host_ok(call_n(time.add_hours, args))
+    "core.time:add_days" => host_ok(call_n(time.add_days, args))
+    "core.time:diff" => host_ok(call_n(time.diff, args))
+    "core.time:to_iso" => host_ok(call_n(time.to_iso, args))
+    "core.time:to_date" => host_ok(call_n(time.to_date, args))
+    "core.time:to_time" => host_ok(call_n(time.to_time, args))
+    "core.time:from_iso" => host_ok(call_n(time.from_iso, args))
+    "core.time:from_date" => host_ok(call_n(time.from_date, args))
+    "core.time:year" => host_ok(call_n(time.year, args))
+    "core.time:month" => host_ok(call_n(time.month, args))
+    "core.time:day_of" => host_ok(call_n(time.day_of, args))
+    "core.time:hour_of" => host_ok(call_n(time.hour_of, args))
+    "core.time:minute_of" => host_ok(call_n(time.minute_of, args))
+    "core.time:second_of" => host_ok(call_n(time.second_of, args))
+    "core.time:weekday" => host_ok(call_n(time.weekday, args))
     "core.regex:matches" => host_ok(call_n(regex.matches, args))
     "core.regex:find" => host_ok(call_n(regex.find, args))
     "core.regex:find_all" => host_ok(call_n(regex.find_all, args))
