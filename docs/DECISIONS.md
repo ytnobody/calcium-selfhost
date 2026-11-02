@@ -260,45 +260,64 @@ Implementing parse-error *reporting* would mean tracking a failure flag through
 the parser and surfacing it in `main.ca`; the `check` command would then print
 `<file>: parse errors` to match. Not started.
 
-## D16 — SH-4 (a VM in Calcium) is started, not finished (open, stretch goal)
+## D16 — SH-4 (a VM in Calcium) (**done for the corpus**)
 
-`vm/mod.ca` now holds the runtime value wrappers Calcium cannot express
-(closures, builtins, ADT values, host functions), the operand stack, the frame
-model, constant decoding, the operand-width table the `.bone` format leaves
-implicit, and a dispatch loop for the opcode set the self-hosted compiler emits.
+The two obstacles recorded here when the slice was started were both resolved
+without leaving Calcium:
 
-Status: **the hello-world path works.** `main.ca run` compiles a program with the
-self-hosted compiler and executes it on the self-hosted VM; a program that loads
-`core.io` and prints a constant produces the same output as the reference.
+1. **No `.bone` reader.** The VM interprets the compiler's in-memory structures,
+   which is enough for `run <in.ca>`. A standalone `run <file.bone>` would still
+   need a deserializer; that remains the one open item in this area.
+2. **The host's module loader is unreachable.** Modules are supplied by a registry
+   (`module_value`) for `core.*`, and by the loader for local modules: it reads
+   `<dir>/<name>/mod.ca`, compiles it with the self-hosted compiler, runs its
+   top-level code on the same VM, and exposes its globals as the exports.
 
-Open defect: a **builtin call** (`len`, `concat`, `to_string`, ...) does not
-reach the host, so `to_string(5) !> io.say` prints nothing while
-`"raw" !> io.say` and `1 + 2 !> io.say` work. Ruled out so far: `apply_builtin`
-and `call_builtin_value` both behave correctly when called directly from a probe
-(`apply_builtin("to_string", [5])` returns `"5"`, `call_builtin_value` returns
-`{v: 4, finished: true}` for `len("abcd")`), so the defect is in the integration
-path (`op_call` → `run_callee` → `apply`), most likely in how an effect function's
-success-wrapped result is unwrapped. The component is therefore **not** marked
-implemented and the harness does not run it.
+Status: `tests/array.test.ca` and eleven other suite files match the reference
+line for line, and the harness compares them (see D19 for the one that is slow).
 
-Two things make SH-4 harder than SH-3, and both need a decision first:
+## D17 — A closure names its unit instead of holding its globals (**done**)
 
-1. **There is no way to read a `.bone` from Calcium.** The slice avoids this by
-   interpreting the compiler's in-memory structures, which also makes the VM
-   testable without writing a deserializer. A standalone `run <file.bone>` would
-   need one.
-2. **The host's module loader is unreachable.** A Calcium program cannot ask the
-   reference VM to load `core.io`, so observable output needs either a registry
-   of Calcium-implemented modules (the sketch in `vm/mod.ca`) or a native hook.
-   Without one, a compiled program can compute but cannot print, which means no
-   differential test can see its result.
+A module is a separate compilation unit with its own globals, so a closure has to
+know which unit it came from. Storing the *array* was the obvious way and it was
+wrong: the array holds the module's closures, so every closure became part of a
+cycle, `Closure → globals → Closure`. Anything that walked a closure then
+recursed forever - printing one with `to_string`, or passing a state that held one
+to an effect function. The symptom was a `use bytecode;` program that never
+returned from its first host call.
 
-Proposed next steps, in order:
+A closure now carries only the unit's *name* (`""` for the program being run) and
+the loader parks each module's globals under `__globals:<path>` in the module
+table; `entry_globals` resolves the array when a frame is created. Values are
+therefore finite and printable, which also makes the VM debuggable.
 
-1. Write the dispatch loop for the opcode subset the compiler emits today
-   (constants, globals/locals, arithmetic, comparisons, jumps, calls, closures,
-   arrays/hashes/tuples/index/member, builtins, ADT construction and matching).
-2. Verify with `main.ca run <in.ca>`: compile with the self-hosted compiler, run
-   with the self-hosted VM, and compare against the reference run.
-3. Extend the module registry until the corpus passes, then decide whether a
-   `.bone` reader is worth adding.
+## D18 — `core.types`, `core.json`, `core.time` forward to the host (**done**)
+
+Those modules sit on primitives (`__json_parse`, `__time_now`, ...) that the
+self-hosted compiler cannot see, so loading their `.ca` sources is not an option.
+The VM loads them itself and forwards each member, which keeps their own
+success/failure shapes without reimplementing parsing or date arithmetic.
+
+`core.time` also exports unit *constants* (`minute`, `hour`, ...), and a member
+read has to yield the value rather than a function, so those are special-cased.
+
+`call_n` dispatched at most four arguments, which silently turned every larger
+host call into `failure("too many arguments")`; it now covers eight.
+
+## D19 — Interpretation is slow, and that is a measured limit, not a TODO (**accepted**)
+
+One interpreted iteration of a tail-recursive count costs ~0.74 ms (1000 → 0.86 s,
+2000 → 1.53 s, 4000 → 2.98 s, 20000 → 14.8 s: linear, and correct at 20000). One
+*instruction* is ~54 µs, dominated by the reference VM executing the interpreter's
+Calcium - roughly 15-25 host calls per instruction for frame/code/ip plumbing and
+state rebuilds.
+
+Tried and measured as no-ops: a fast path in `put_at`, resolving the module id
+once in `entry_globals`, inlining the opcode-width table instead of calling into
+`bytecode`, and reordering the dispatch match. The remaining lever is threading
+`code` (and the frame base) into the opcode handlers so they stop re-deriving it,
+which would touch ~20 sites for an estimated 30-40%.
+
+`tests/tco.test.ca` (50000 deep) is therefore kept *in* the harness rather than
+excluded: it passes, it just takes ~40 s, and excluding it would hide a real
+capability behind a timeout.

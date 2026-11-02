@@ -2,9 +2,14 @@
 
 A from-scratch reimplementation of the Calcium toolchain in Calcium itself.
 
-**Status: compiler implemented.** The lexer's token stream and the formatter's
-output match the reference byte for byte, and the compiler's output behaves
-identically on every comparable corpus file. See `SPEC.md` for the stage plan.
+**Status: front end, compiler and interpreter implemented.** The lexer's token
+stream and the formatter's output match the reference byte for byte; the
+compiler's output behaves identically on every comparable corpus file; and the
+interpreter runs the compiled programs, including the twelve suite files that
+match the reference line for line. The harness reports
+`134 passed, 0 skipped, 13 excluded` - the exclusions are the three
+static-constraint suites (out of scope by decision, `docs/DECISIONS.md` D13).
+See `SPEC.md` for the stage plan and D19 for the one file that is slow.
 
 The Go implementation in [`calcium-lang`](https://github.com/ytnobody/calcium-lang)
 is the **reference implementation** and the source of truth for the language
