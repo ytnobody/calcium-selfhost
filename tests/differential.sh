@@ -386,8 +386,9 @@ run_bone() {
     local files f out_oracle out_cand st_oracle st_cand
     out_oracle="$WORK/bone-oracle.out"
     out_cand="$WORK/bone-cand.out"
-    # Examples only: a .bone carries no `use` list, so a program that needs a local
-    # module cannot be re-resolved from the compiled form.
+    # Examples only: a .bone carries no `use` list, and the *reference* cannot
+    # resolve a local module from a compiled file either ("module 'test' not
+    # found"), so there is nothing to compare against.
     mapfile -t files < <(find "$CALCIUM_LANG/examples" -name '*.ca' | sort)
     for f in "${files[@]}"; do
         if vm_excluded "$f"; then
