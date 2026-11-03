@@ -10,15 +10,43 @@ recorded workaround.
 
 ---
 
-## D1 — Value representation (open, blocks SH-4)
+## D1 — Value representation (**decided**)
 
-`value.go` has 23 `TYPE_*` variants. In a self-hosted VM those values *are*
-Calcium values, so `value.go` disappears — except for the variants wrapping host
-pointers: `TYPE_TASK`, `TYPE_CHANNEL`, `TYPE_EVENT_SOURCE`, `TYPE_SECRET`,
-`TYPE_SECRET_CAPABILITY`.
+The original question was which host-pointer variants (`TYPE_TASK`, `TYPE_CHANNEL`,
+`TYPE_EVENT_SOURCE`, `TYPE_SECRET`, `TYPE_SECRET_CAPABILITY`) must survive as opaque
+handles threaded through the native boundary.
 
-Decide which stay as opaque handles threaded through the native boundary. This
-determines the VM's value model and therefore what SH-3 must emit.
+The answer, after the interpreter was written: **none of them, because none of those
+values can be produced by the programs this toolchain runs.**
+
+- async (tasks, channels, event sources) is out of scope — D24, `docs/ASYNC.md`.
+- `Secret.with` cannot be reached: nothing in the language creates a capability — D22.
+
+So the model in use is simply:
+
+1. **A Calcium value is a Calcium value.** Integers, floats, strings, booleans,
+   arrays, hashes, `success`/`failure` and native `Maybe` are used directly; there is
+   no parallel value struct, and therefore no marshalling at the boundary.
+2. **Only what Calcium cannot express is wrapped**, in one ADT at the top of
+   `vm/mod.ca`:
+
+   ```calcium
+   type Value =
+       Closure(record, free, consts, mod) |   // a compiled function plus its unit
+       BuiltinFn(index) |                     // one of the 35 builtin slots
+       AdtVal(type_name, tag, items) |        // an ADT held as a constant
+       HostFn(name);                          // a native function reached by name
+   ```
+3. **Constants have their own representation** (`serialize.Constant`: bool, int,
+   float, string, function record, ADT, regex), because they come from the bytecode
+   pool rather than from the program.
+4. **A closure names its unit instead of holding its globals** (D17), which keeps
+   values finite and printable.
+
+Consequences, already visible in the code: `is_callable` has to know the four
+wrappers (any host predicate cannot see them), `to_string` has to render them by hand
+(`vm_to_string`), and the module registry is a table of `HostFn`s rather than native
+module objects.
 
 ## D2 — Async runtime (open, blocks SH-4)
 
