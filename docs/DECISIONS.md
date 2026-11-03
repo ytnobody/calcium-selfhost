@@ -240,99 +240,6 @@ risk the frame limit.
 Verified: 12 KB, 62 KB and 125 KB inputs lex in 0.16 s, 0.75 s and 1.44 s
 (linear), all byte-identical to the reference.
 
-## D26 — The LSP is not part of the target, but it is the natural next stage (**accepted**)
-
-The reference ships `calcium-lsp` (298 lines of server, 379 of tests, 1,653 across the
-package). It depends only on `pkg/ast`, `pkg/lexer`, `pkg/parser` and `pkg/token` — the
-whole front end, which this repository already has.
-
-Feasibility is not the question. A self-hosted LSP would be *cheaper* than the VM was:
-`core.json` is available (forwarded by the VM bridge), stdio is available through
-`core.io`/`core.os`, and the front end is done. It could be verified the same way
-everything else is: drive both servers with the same JSON-RPC messages and compare the
-responses.
-
-It is out of scope because of what it is, not what it costs:
-
-- It is a *client* of the toolchain, not part of it. The target was lexer → parser →
-  formatter → type checker → compiler → VM, and that is complete.
-- It would add a second protocol surface and a long-lived process to something that is
-  currently a batch tool: a new failure mode (partial documents, cancellation,
-  incremental sync) that the corpus cannot exercise.
-- Deciding to have one is a product decision, not a technical one, and nothing in the
-  current deliverable depends on it.
-
-If editor support is wanted, this is the plan: a `lsp` component next to `typechecker`,
-a `calcium-lsp` entry point, and a harness stage that replays a recorded JSON-RPC
-session against both servers.
-
-## D25 — `.bone` records no module list (**accepted**)
-
-A compiled program names its modules only where it uses them: `OpLoadModule` carries
-a constant holding the path. There is no header list, so resolution happens at load
-time through the implementation's search path — which is why a program that needs a
-local module (`use test;`) can only be run from a `.bone` where that module is
-reachable, exactly as in the reference (`module error: module 'test' not found`).
-
-Recording the list was considered and rejected: implementations resolve modules
-differently (search path, cache, registry), a stale list would shadow a module that
-changed after compilation, and the format is shared contract rather than a place to
-encode a search path.
-
-The `.bone` stage is therefore limited to `examples/`, and the reasoning is now part
-of the format specification (`specs/bone-format.md` §3.2 in `calcium-lang`, branch
-`docs/bone-module-resolution`) instead of only living in this repository's notes.
-
-## D24 — Async stays out of scope, with the analysis written down (**accepted**)
-
-The six `async_*` examples need task/scheduler opcodes that are part of the frozen
-bytecode format (`OpSpawn`, `OpStayBegin`, `OpStayGetState`, `OpContinue`,
-`OpStayEnd`) plus a timer source, which the reference supplies as a *native*
-`core.schedule` module. `docs/ASYNC.md` records what that means for this
-implementation: the compiler already emits the opcodes, the VM stops at the first
-one with `unsupported opcode 51`, and the realistic implementation is option A
-(keep the scheduler native, add the opcodes and two or three primitives).
-
-It is deferred because the toolchain self-hosts without it, and because the wait
-primitive would be an upstream FFI change. The trigger to revisit and the
-acceptance criteria are in `docs/ASYNC.md`.
-
-## D23 — Constraint checks: dynamic done, static open (**partly done**)
-
-Constraints have two halves, and they were both missing.
-
-**Dynamic (done).** `OpCheckConstraint` was not implemented in the VM, so any
-`value |> Constraint?` aborted with `unsupported opcode 46`; and the built-in type
-constraints (`Int?`, `Function?`, `Positive?`, …) were registered as builtins 16-34
-but implemented with unguarded comparisons (`args[0] > 0` raises on a string) and
-with `types.is_function`, which cannot see the interpreter's own closures. The VM
-now implements the opcode, mirrors the reference's truthiness, and the constraint
-predicates are type-guarded and wrapper-aware. The three `tests/*_constraint.test.ca`
-suites match the reference as a result.
-
-**Static (decided: not worth doing now).** The reference rejects `safe_sqrt(-4)` at
-*compile* time by evaluating constraints over literal arguments
-(`pkg/compiler/static_constraint.go`, 827 Go lines: literal evaluation, const
-tracking, composite constraint expansion). The candidate checks at run time instead,
-so the outcome is `failure(-4)` rather than a compile error.
-
-Three measurements say porting it buys nothing:
-
-1. **`check` already agrees.** Both implementations report
-   `examples/constraint.ca: 0 finding(s)` — the static check is not part of `check`.
-2. **The compared output cannot be matched.** The reference's message is
-   `line 71, column 20:` + a caret line + the source line + the constraint text, and
-   the harness compares raw output. Reproducing it needs the *position of the
-   argument expression*, and the AST carries no positions for expressions at all
-   (`ast/mod.ca` has no line/column fields; only annotations do).
-3. **The file is excluded anyway.** `examples/constraint.ca` is out of the `vm`,
-   `compile` and `.bone` stages because the reference itself exits non-zero on it.
-
-So the static evaluator would add ~800 lines of literal evaluation and still compare
-zero additional behaviour. It becomes worth doing if expressions ever gain positions
-for another reason — better diagnostics generally would be that reason — at which
-point the evaluator can follow the decomposition in issue #2.
-
 ## D13 — The type checker (**done**)
 
 Implemented, with the verification gap addressed:
@@ -452,44 +359,6 @@ read has to yield the value rather than a function, so those are special-cased.
 `call_n` dispatched at most four arguments, which silently turned every larger
 host call into `failure("too many arguments")`; it now covers eight.
 
-## D22 — `Secret.with` is not supported, deliberately (**accepted**)
-
-The construct is syntactically valid and the reference compiles it, but *no
-Calcium program can reach it*: `OpSecretWithBegin` pops a value that must be a
-`SecretCapability`, and nothing in the language produces one (the primitives that
-create capabilities are not exposed; no file in the repository mentions
-`Secret.with`). Running one in the reference gives
-`runtime error: Secret.with: expected a SecretCapability, got int`.
-
-Implementing parser, compiler and VM support would therefore be unverifiable — no
-program exists to compare. The compiler reports `unsupported expression` for it
-instead, which is the safe failure this project settled on after D14's silent
-`do`-block bug: a construct either compiles correctly or says it cannot.
-
-## D20 — Runtime errors are reported, not dropped (**done**)
-
-The interpreter's dispatch ignored the ok flag on every step, so a `fail` - a
-no-match, or a type error raised by the host - emptied the frames and the run just
-stopped: no message, exit status 0. `test/mod.test.ca` "passed" that way while
-silently truncating.
-
-The state now carries `error`, set by `fail`; `run_with_modules` returns
-`{ok, v, error}` and the CLI prints `runtime error: ...` and exits 1, like a
-compile error. `examples/factorial.ca` is excluded from the VM and .bone stages as
-a consequence: its `match n` arms are `0` and `true`, so nothing matches from n=1,
-and the reference stops after the first line *silently*.
-
-## D21 — The FFI primitives a module names are filled in by the loader (**done**)
-
-The reference registers `__str_contains` and friends as builtins before compiling
-a module. This compiler has no such table, so those names compiled to nothing and
-the call went to whatever was on the stack. The loader now collects the
-`__`-prefixed identifiers from the module's tokens, reserves a global for each, and
-fills the slots with host functions the VM forwards.
-
-`test/mod.test.ca` (the framework's own suite: `like`, `unlike`, `cmp_ok`,
-`is_type`) matches the reference as a result.
-
 ## D19 — Interpretation is slow, and that is a measured limit, not a TODO (**accepted**)
 
 **Current measurements** (re-measured after the fusion work; see below for the
@@ -537,6 +406,137 @@ than the ones above.
 
 `tests/tco.test.ca` is kept *in* the harness rather than excluded: it passes in 94 s,
 and excluding it would hide a real capability behind a timeout.
+
+## D20 — Runtime errors are reported, not dropped (**done**)
+
+The interpreter's dispatch ignored the ok flag on every step, so a `fail` - a
+no-match, or a type error raised by the host - emptied the frames and the run just
+stopped: no message, exit status 0. `test/mod.test.ca` "passed" that way while
+silently truncating.
+
+The state now carries `error`, set by `fail`; `run_with_modules` returns
+`{ok, v, error}` and the CLI prints `runtime error: ...` and exits 1, like a
+compile error. `examples/factorial.ca` is excluded from the VM and .bone stages as
+a consequence: its `match n` arms are `0` and `true`, so nothing matches from n=1,
+and the reference stops after the first line *silently*.
+
+## D21 — The FFI primitives a module names are filled in by the loader (**done**)
+
+The reference registers `__str_contains` and friends as builtins before compiling
+a module. This compiler has no such table, so those names compiled to nothing and
+the call went to whatever was on the stack. The loader now collects the
+`__`-prefixed identifiers from the module's tokens, reserves a global for each, and
+fills the slots with host functions the VM forwards.
+
+`test/mod.test.ca` (the framework's own suite: `like`, `unlike`, `cmp_ok`,
+`is_type`) matches the reference as a result.
+
+## D22 — `Secret.with` is not supported, deliberately (**accepted**)
+
+The construct is syntactically valid and the reference compiles it, but *no
+Calcium program can reach it*: `OpSecretWithBegin` pops a value that must be a
+`SecretCapability`, and nothing in the language produces one (the primitives that
+create capabilities are not exposed; no file in the repository mentions
+`Secret.with`). Running one in the reference gives
+`runtime error: Secret.with: expected a SecretCapability, got int`.
+
+Implementing parser, compiler and VM support would therefore be unverifiable — no
+program exists to compare. The compiler reports `unsupported expression` for it
+instead, which is the safe failure this project settled on after D14's silent
+`do`-block bug: a construct either compiles correctly or says it cannot.
+
+## D23 — Constraint checks: dynamic done, static open (**partly done**)
+
+Constraints have two halves, and they were both missing.
+
+**Dynamic (done).** `OpCheckConstraint` was not implemented in the VM, so any
+`value |> Constraint?` aborted with `unsupported opcode 46`; and the built-in type
+constraints (`Int?`, `Function?`, `Positive?`, …) were registered as builtins 16-34
+but implemented with unguarded comparisons (`args[0] > 0` raises on a string) and
+with `types.is_function`, which cannot see the interpreter's own closures. The VM
+now implements the opcode, mirrors the reference's truthiness, and the constraint
+predicates are type-guarded and wrapper-aware. The three `tests/*_constraint.test.ca`
+suites match the reference as a result.
+
+**Static (decided: not worth doing now).** The reference rejects `safe_sqrt(-4)` at
+*compile* time by evaluating constraints over literal arguments
+(`pkg/compiler/static_constraint.go`, 827 Go lines: literal evaluation, const
+tracking, composite constraint expansion). The candidate checks at run time instead,
+so the outcome is `failure(-4)` rather than a compile error.
+
+Three measurements say porting it buys nothing:
+
+1. **`check` already agrees.** Both implementations report
+   `examples/constraint.ca: 0 finding(s)` — the static check is not part of `check`.
+2. **The compared output cannot be matched.** The reference's message is
+   `line 71, column 20:` + a caret line + the source line + the constraint text, and
+   the harness compares raw output. Reproducing it needs the *position of the
+   argument expression*, and the AST carries no positions for expressions at all
+   (`ast/mod.ca` has no line/column fields; only annotations do).
+3. **The file is excluded anyway.** `examples/constraint.ca` is out of the `vm`,
+   `compile` and `.bone` stages because the reference itself exits non-zero on it.
+
+So the static evaluator would add ~800 lines of literal evaluation and still compare
+zero additional behaviour. It becomes worth doing if expressions ever gain positions
+for another reason — better diagnostics generally would be that reason — at which
+point the evaluator can follow the decomposition in issue #2.
+
+## D24 — Async stays out of scope, with the analysis written down (**accepted**)
+
+The six `async_*` examples need task/scheduler opcodes that are part of the frozen
+bytecode format (`OpSpawn`, `OpStayBegin`, `OpStayGetState`, `OpContinue`,
+`OpStayEnd`) plus a timer source, which the reference supplies as a *native*
+`core.schedule` module. `docs/ASYNC.md` records what that means for this
+implementation: the compiler already emits the opcodes, the VM stops at the first
+one with `unsupported opcode 51`, and the realistic implementation is option A
+(keep the scheduler native, add the opcodes and two or three primitives).
+
+It is deferred because the toolchain self-hosts without it, and because the wait
+primitive would be an upstream FFI change. The trigger to revisit and the
+acceptance criteria are in `docs/ASYNC.md`.
+
+## D25 — `.bone` records no module list (**accepted**)
+
+A compiled program names its modules only where it uses them: `OpLoadModule` carries
+a constant holding the path. There is no header list, so resolution happens at load
+time through the implementation's search path — which is why a program that needs a
+local module (`use test;`) can only be run from a `.bone` where that module is
+reachable, exactly as in the reference (`module error: module 'test' not found`).
+
+Recording the list was considered and rejected: implementations resolve modules
+differently (search path, cache, registry), a stale list would shadow a module that
+changed after compilation, and the format is shared contract rather than a place to
+encode a search path.
+
+The `.bone` stage is therefore limited to `examples/`, and the reasoning is now part
+of the format specification (`specs/bone-format.md` §3.2 in `calcium-lang`, branch
+`docs/bone-module-resolution`) instead of only living in this repository's notes.
+
+## D26 — The LSP is not part of the target, but it is the natural next stage (**accepted**)
+
+The reference ships `calcium-lsp` (298 lines of server, 379 of tests, 1,653 across the
+package). It depends only on `pkg/ast`, `pkg/lexer`, `pkg/parser` and `pkg/token` — the
+whole front end, which this repository already has.
+
+Feasibility is not the question. A self-hosted LSP would be *cheaper* than the VM was:
+`core.json` is available (forwarded by the VM bridge), stdio is available through
+`core.io`/`core.os`, and the front end is done. It could be verified the same way
+everything else is: drive both servers with the same JSON-RPC messages and compare the
+responses.
+
+It is out of scope because of what it is, not what it costs:
+
+- It is a *client* of the toolchain, not part of it. The target was lexer → parser →
+  formatter → type checker → compiler → VM, and that is complete.
+- It would add a second protocol surface and a long-lived process to something that is
+  currently a batch tool: a new failure mode (partial documents, cancellation,
+  incremental sync) that the corpus cannot exercise.
+- Deciding to have one is a product decision, not a technical one, and nothing in the
+  current deliverable depends on it.
+
+If editor support is wanted, this is the plan: a `lsp` component next to `typechecker`,
+a `calcium-lsp` entry point, and a harness stage that replays a recorded JSON-RPC
+session against both servers.
 
 ## D27 — SH-4 is scoped to correctness, not speed, going forward (**accepted**)
 
