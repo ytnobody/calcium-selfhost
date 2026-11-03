@@ -544,3 +544,21 @@ the remaining cost there.
 `tests/tco.test.ca` (50000 deep) is therefore kept *in* the harness rather than
 excluded: it passes, it just takes ~40 s, and excluding it would hide a real
 capability behind a timeout.
+
+## D25 — SH-4 is scoped to correctness, not speed, going forward (**accepted**)
+
+D19 already settled that the double-interpretation cost is intrinsic, not a
+TODO. This makes the implication explicit for future work: further VM effort
+is scoped to closing gaps in `docs/EXCLUSIONS.md` (so the differential harness
+covers more of the corpus), not to chasing the per-instruction cost.
+
+The fusion work that produced D19's current numbers was worth doing because it
+removed accidental overhead that happened to be lying around. It is not the
+start of a performance track — SH-4 is a stretch goal by its own definition
+(`calcium-lang/specs/selfhost-scope.md` §4), and no amount of further tuning
+gets past the double-interpretation ceiling, only amortizes it.
+
+Same reasoning applies to scope decisions still open elsewhere: the LSP (D3)
+and giving `.bone` module information (tracked as a self-hosted-repo issue,
+not a `calcium-lang` decision) both stay deferred rather than built, until a
+concrete need - not "it would be nearly free" - asks for them.
