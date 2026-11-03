@@ -107,6 +107,15 @@ candidate() { # candidate <command> [args...]
     "$ORACLE" "$ROOT/main.ca" "$@"
 }
 
+# note_excluded records a file that a stage cannot compare, and says why when
+# VERBOSE=1 (`VERBOSE=1 bash tests/differential.sh` lists every exclusion). The
+# count is what the summary line reports.
+EXCLUDE_REASON=""
+note_excluded() { # note_excluded <stage> <file> <reason>
+    excluded=$((excluded + 1))
+    [[ "${VERBOSE:-}" == "1" ]] && printf 'exclude %-8s %-46s %s\n' "$1" "${2#$CALCIUM_LANG/}" "$3" >&2
+}
+
 have_component() { # have_component <name>
     # Every component module carries `func implemented()`; the CLI does not
     # surface it yet, so read the source. This stays honest before and after a
@@ -165,8 +174,7 @@ run_lex() {
         out_cand="$WORK/lex-cand-$(basename "$f")"
 
         if ! "$ORACLE" lex "$f" </dev/null >"$out_oracle" 2>&1; then
-            # A per-file exclusion, not a skipped stage.
-            excluded=$((excluded + 1))
+            note_excluded lex "$f" "the reference cannot lex it"
             continue
         fi
         if ! candidate lex "$f" </dev/null >"$out_cand" 2>&1; then
@@ -196,12 +204,10 @@ run_fmt() {
         base=$(basename "$f")
         out_oracle="$WORK/oracle-$base"
         out_cand="$WORK/cand-$base"
-        cp "$f" "$out_oracle" 2>/dev/null || { excluded=$((excluded + 1)); continue; }
+        cp "$f" "$out_oracle" 2>/dev/null || { note_excluded fmt "$f" "unreadable"; continue; }
 
         if ! "$ORACLE" fmt "$out_oracle" >/dev/null 2>&1; then
-            # The oracle cannot format it (a file it cannot parse); a per-file
-            # exclusion, not a skipped stage.
-            excluded=$((excluded + 1))
+            note_excluded fmt "$f" "the reference cannot parse it"
             continue
         fi
         if ! candidate fmt "$f" -o "$out_cand" >"$WORK/fmt.err" 2>&1; then
@@ -247,15 +253,19 @@ vm_corpus() {
 }
 
 vm_excluded() {
+    EXCLUDE_REASON="excluded by policy (see the comments above)"
     case "$(basename "$1")" in
-        async_*.ca|constraint.ca) return 0 ;;
-        constraint.test.ca|function_constraint.test.ca|primitive_constraint.test.ca) return 0 ;;
+        async_*.ca) EXCLUDE_REASON="async: needs the host event scheduler (D2)"; return 0 ;;
+        constraint.ca) EXCLUDE_REASON="needs the static constraint checker (D13)"; return 0 ;;
+        constraint.test.ca|function_constraint.test.ca|primitive_constraint.test.ca)
+            EXCLUDE_REASON="needs the static constraint checker (D13)"; return 0 ;;
         # factorial.ca contains a `match n` whose arms are `0` and `true`; from n=1
         # no arm matches. The reference stops after the first line and still exits 0
         # because its VM drops the runtime error silently. The candidate reports the
         # no-match and exits 1, which is the behaviour we want to keep, so the two
         # differ on purpose.
-        factorial.ca) return 0 ;;
+        factorial.ca)
+            EXCLUDE_REASON="the reference drops the runtime error silently"; return 0 ;;
         # csv/mod.test.ca fails in both implementations, but the reference's message
         # names its own source position; diagnostic text is not contractual.
         mod.test.ca) [ "$(dirname "$1")" = "$CALCIUM_LANG/csv" ] && return 0 || return 1 ;;
@@ -275,13 +285,13 @@ run_vm() {
     mapfile -t files < <(vm_corpus)
     for f in "${files[@]}"; do
         if vm_excluded "$f"; then
-            excluded=$((excluded + 1))
+            note_excluded vm "$f" "$EXCLUDE_REASON"
             continue
         fi
         ( cd "$CALCIUM_LANG" && "$ORACLE" "$f" ) >"$out_oracle" 2>&1
         st_oracle=$?
         if [[ $st_oracle -ne 0 ]]; then
-            excluded=$((excluded + 1))
+            note_excluded vm "$f" "the reference cannot run it"
             continue
         fi
         candidate run "$f" </dev/null >"$out_cand" 2>&1
@@ -313,8 +323,10 @@ run_vm() {
 #   constraint.ca     expects a compile error from the static constraint checker,
 #                     which is not implemented yet; the candidate runs it instead.
 compile_excluded() {
+    EXCLUDE_REASON="excluded by policy (see the comments above)"
     case "$(basename "$1")" in
-        async_spawn.ca|constraint.ca) return 0 ;;
+        async_spawn.ca) EXCLUDE_REASON="non-deterministic in the reference too"; return 0 ;;
+        constraint.ca) EXCLUDE_REASON="needs the static constraint checker (D13)"; return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -329,7 +341,7 @@ run_compile() {
     mapfile -t files < <(corpus_files)
     for f in "${files[@]}"; do
         if compile_excluded "$f"; then
-            excluded=$((excluded + 1))
+            note_excluded compile "$f" "$EXCLUDE_REASON"
             continue
         fi
         base=$(basename "$f")
@@ -347,7 +359,7 @@ run_compile() {
         ( cd "$CALCIUM_LANG" && "$ORACLE" "$f" ) >"$out_oracle" 2>&1
         st_oracle=$?
         if [[ $st_oracle -ne 0 ]]; then
-            excluded=$((excluded + 1))
+            note_excluded compile "$f" "the reference cannot run it"
             continue
         fi
 
@@ -392,13 +404,13 @@ run_bone() {
     mapfile -t files < <(find "$CALCIUM_LANG/examples" -name '*.ca' | sort)
     for f in "${files[@]}"; do
         if vm_excluded "$f"; then
-            excluded=$((excluded + 1))
+            note_excluded bone "$f" "$EXCLUDE_REASON"
             continue
         fi
         ( cd "$CALCIUM_LANG" && "$ORACLE" "$f" ) >"$out_oracle" 2>&1
         st_oracle=$?
         if [[ $st_oracle -ne 0 ]]; then
-            excluded=$((excluded + 1))
+            note_excluded bone "$f" "the reference cannot run it"
             continue
         fi
         candidate compile "$f" -o "$WORK/one.bone" >/dev/null 2>&1
