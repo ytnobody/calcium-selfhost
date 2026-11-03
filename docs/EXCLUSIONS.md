@@ -79,7 +79,9 @@ modules are written against, so running them directly fails there. The candidate
 loads them through its module loader, which does supply the primitives (**D21**),
 so there is nothing to compare against.
 
-Whether a compiled file should be able to carry that list is issue #7.
+Whether a compiled file should be able to carry that list is issue #7: it was
+considered and rejected (**D25**), and the format specification now says so
+(`specs/bone-format.md` §3.2).
 
 These files are the densest Calcium in the repository, and they are compared in
 `lex`, `fmt` and `check` like any other file — only the *run* comparison is
