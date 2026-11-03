@@ -27,8 +27,8 @@ the `vm` and the `bone` stage counts twice. **25 distinct files** are affected.
 | `vm` | 11 |
 | `bone` | 8 |
 
-Note what this means: `lex`, `fmt` and `check` compare **every** corpus file
-except one (see C). The exclusions below are almost entirely about *running* a
+Note what this means: `lex` and `check` compare **every** corpus file, and `fmt`
+compares all but `io.ca` (group E). The exclusions below are about *running* a
 program, which needs both implementations to agree on what a program's output is.
 
 ---
