@@ -684,6 +684,13 @@ func parse_case_guard(toks) = match kind(toks) == "IDENT" && lit(toks) == "if"
 
 func parse_case_pattern(toks) = match kind(toks) == "_"
     true => res(ast.EWild, rest(toks))
+    false => parse_case_pattern_missing(toks);
+
+// An arm with no pattern at all (`=> body`) is an error. It is marked with an empty
+// constructor pattern - which no real pattern can be - so `has_errors` sees it,
+// since a fallback to a wildcard would look like a legitimate `_ =>`.
+func parse_case_pattern_missing(toks) = match kind(toks) == "=>"
+    true => res(ast.EConstructorPattern("", "", []), toks)
     false => parse_case_pattern_rest(toks);
 
 func parse_case_pattern_rest(toks) = match kind(toks) == "IDENT" && starts_upper(lit(toks)) && peek_kind(toks) == "."
@@ -907,3 +914,108 @@ func do_final(ss) = match len(ss) == 0
 func do_final_expr(s) = match s
     Stmt.SExpr(e) => e
     _ => ast.EWild;
+
+// ---------------------------------------------------------------------------
+// Parse errors
+//
+// The parser is total: a construct it cannot read becomes a wildcard and parsing
+// continues, which keeps it from hanging on malformed input. That makes a bad
+// program look like a good one, so the tree is inspected afterwards for a wildcard
+// where an operand belongs. Wildcards are legitimate in a few slots (a `do` block
+// that ends with `;`, a wildcard pattern, `_` in a parameter list) and those are
+// skipped.
+// ---------------------------------------------------------------------------
+
+func has_errors(statements) = any_stmt(statements, 0, len(statements));
+
+func any_stmt(ss, i, n) = match i >= n
+    true => false
+    false => any_stmt_step(ss, i, n);
+
+func any_stmt_step(ss, i, n) = match stmt_has_error(ss[i])
+    true => true
+    false => any_stmt(ss, i + 1, n);
+
+func stmt_has_error(s) = match s
+    Stmt.SExpr(e) => bad_expr(e)
+    Stmt.SAssign(name, v) => bad_expr(v)
+    Stmt.SAssignAnnot(name, annot, v) => bad_expr(v)
+    Stmt.SArrayDestr(names, v) => bad_expr(v)
+    Stmt.SHeadTailDestr(head, tail, v) => bad_expr(v)
+    Stmt.SFunc(name, params, cs, ts, rc, body, eff) => bad_expr(body)
+    Stmt.SConstraint(name, params, body) => bad_expr(body)
+    _ => false;
+
+func any_expr(es, i, n) = match i >= n
+    true => false
+    false => any_expr_step(es, i, n);
+
+func any_expr_step(es, i, n) = match bad_expr(es[i])
+    true => true
+    false => any_expr(es, i + 1, n);
+
+func any_pair(ps, i, n) = match i >= n
+    true => false
+    false => any_pair_step(ps, i, n);
+
+// HashPair and Case are ADTs, so their fields are destructured rather than read
+// with a dot.
+func any_pair_step(ps, i, n) = match ps[i]
+    HashPair(key, value) => any_pair_from(bad_expr(key) || bad_expr(value), ps, i, n)
+    _ => any_pair(ps, i + 1, n);
+
+func any_pair_from(found, ps, i, n) = match found
+    true => true
+    false => any_pair(ps, i + 1, n);
+
+func any_case(cs, i, n) = match i >= n
+    true => false
+    false => any_case_step(cs, i, n);
+
+func any_case_step(cs, i, n) = match cs[i]
+    Case(pat, grd, bdy, dflt) => any_case_from(bad_expr(bdy) || bad_pattern(pat), cs, i, n)
+    _ => any_case(cs, i + 1, n);
+
+func any_case_from(found, cs, i, n) = match found
+    true => true
+    false => any_case(cs, i + 1, n);
+
+// An empty constructor pattern is the marker the case parser leaves for an arm with
+// no pattern at all.
+func bad_pattern(p) = match p
+    Expr.EConstructorPattern(type_name, name, fields) => type_name == "" && name == ""
+    _ => false;
+
+// bad_final is bad_expr for a block's last expression, where a wildcard means "the
+// block ended with a semicolon" and is not an error.
+func bad_final(e) = match e
+    Expr.EWild => false
+    _ => bad_expr(e);
+
+func bad_expr(e) = match e
+    Expr.EWild => true
+    Expr.EInterp(parts) => any_expr(parts, 0, len(parts))
+    Expr.ETuple(es) => any_expr(es, 0, len(es))
+    Expr.EArray(es, c) => any_expr(es, 0, len(es))
+    Expr.EHash(pairs) => any_pair(pairs, 0, len(pairs))
+    Expr.EPrefix(op, r) => bad_expr(r)
+    Expr.EInfix(op, l, r) => bad_expr(l) || bad_expr(r)
+    Expr.ECall(fn, args) => bad_expr(fn) || any_expr(args, 0, len(args))
+    Expr.EIndex(l, idx) => bad_expr(l) || bad_expr(idx)
+    Expr.EMember(o, p) => bad_expr(o)
+    Expr.ELambda(params, body) => bad_expr(body)
+    Expr.EPipe(l, r) => bad_expr(l) || bad_expr(r)
+    Expr.EEffectPipe(l, r, s) => bad_expr(l) || bad_expr(r)
+    Expr.EErrorPipe(l, r) => bad_expr(l) || bad_expr(r)
+    Expr.ESpread(v) => bad_expr(v)
+    // A match with no arms is not a match; the reference rejects it.
+    Expr.EMatch(subject, cases) => bad_expr(subject) || len(cases) == 0 || any_case(cases, 0, len(cases))
+    Expr.EEffectHandle(subject, sv, sb, fv, fb) => bad_expr(subject) || bad_expr(sb) || bad_expr(fb)
+    Expr.ESuccess(v) => bad_expr(v)
+    Expr.EFailure(v) => bad_expr(v)
+    Expr.EReturn(v) => bad_expr(v)
+    Expr.EConstraintCheck(t) => bad_expr(t)
+    Expr.EDo(ss, final) => any_stmt(ss, 0, len(ss)) || bad_final(final)
+    Expr.ESecretWith(cap, ss, final) => bad_expr(cap) || any_stmt(ss, 0, len(ss)) || bad_final(final)
+    Expr.EStay(init, body) => bad_expr(init) || bad_expr(body)
+    _ => false;

@@ -309,17 +309,27 @@ SH-3 note: `constraint.ca` is excluded from the compile stage for the adjacent
 reason — the reference rejects it with a static-constraint error, and that
 checker is the piece that is not implemented.
 
-## D15 — Parse errors: the invalid unary plus (**done**)
+## D15 — Parse errors (**done**)
 
-`core/io.ca` uses `++`, which both lexers split into two `+` tokens. The reference
-rejects the file; this parser read `a ++ b` as `a + (+b)` and said nothing, so
-`check` reported `0 finding(s)` where the reference reports `parse errors`.
+The parser is total: a construct it cannot read becomes a wildcard and parsing
+continues, which is what keeps it from hanging on malformed input. The price was
+that a malformed program looked like a good one - `core/io.ca`'s `a ++ b` was read as
+`a + (+b)`, and `x = 1 + ;` simply ran.
 
-Calcium has no unary plus, so a `+` in an operand position is precisely the invalid
-case. The token stream is scanned for it before the checker runs (`bad_unary_plus`
-in `main.ca`) and `check` prints the reference's shape. A full parser-level error
-channel is still not threaded through - a construct that fails to *parse* but still
-produces an AST is reported, rather than every malformed token being diagnosed.
+`parser.has_errors` now walks the tree for a wildcard where an operand belongs.
+Wildcards are legitimate in three slots and those are skipped: a `do` block that ends
+with `;`, a wildcard pattern, and `_` in a parameter list. Two extra markers are
+needed for shapes that would otherwise look like legitimate wildcards - an arm with
+no pattern at all (`=> body`), and a `match` with no arms.
+
+`check`, `run` and `compile` all refuse such a file (`<path>: parse errors`, exit 1).
+Ten malformed inputs that the reference rejects are now rejected here with the same
+shape, and no corpus file is misdetected (the harness compares `check` on the whole
+corpus).
+
+An earlier version of this fix scanned the token stream for a `+` in operand
+position, exploiting the fact that Calcium has no unary plus. That caught `++` and
+nothing else; the tree check replaced it.
 
 Original note:
 

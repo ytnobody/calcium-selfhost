@@ -131,11 +131,22 @@ func compile_file(argv) = do
     output = get(argv, 5, "")
     src = read_source(input)
     parsed = parser.parse_program(lexer.tokenize(src))
+    refuse_parse_errors(input, parsed.statements)
     st = compiler.compile_program(parsed.statements)
     match len(st.errors) == 0
         true => io.write_file(output, serialize.to_string_bytes(compiler.to_bone(st)))
         false => report_compile_errors(input, st.errors, 0, len(st.errors))
 end;
+
+// refuse_parse_errors stops a file the parser could not read. The parser is total -
+// it substitutes a wildcard and carries on - so without this a malformed program
+// would be *executed*, which is how `x = 1 ++ 2;` used to run quietly.
+func! refuse_parse_errors(path, statements) = match parser.has_errors(statements)
+    true => do
+        concat(path, ": parse errors") !> io.say;
+        os.exit(1)
+    end
+    false => 0;
 
 // report_compile_errors prints `<file>:<line>:<col>: <message>` per diagnostic and
 // exits non-zero, so a compile that found problems cannot look successful.
@@ -185,6 +196,7 @@ end;
 func! run_source(path) = do
     src = read_source(path)
     parsed = parser.parse_program(lexer.tokenize(src))
+    refuse_parse_errors(path, parsed.statements)
     st = compiler.compile_program(parsed.statements)
     match len(st.errors) == 0
         true => do
@@ -209,9 +221,10 @@ end;
 // `calcium check`.
 func check_file(path) = do
     toks = lexer.tokenize(read_source(path))
-    match bad_unary_plus(toks)
+    statements = parser.parse_program(toks).statements
+    match parser.has_errors(statements)
         true => check_parse_errors(path)
-        false => check_findings(path, toks)
+        false => check_findings(path, statements)
 end;
 
 // The reference reports `parse errors` for a file its parser rejects; this
@@ -219,30 +232,12 @@ end;
 // Calcium has no unary plus, which is exactly what makes `++` invalid.
 func check_parse_errors(path) = concat(path, ": parse errors") !> io.say;
 
-func check_findings(path, toks) = do
-    findings = typechecker.check(parser.parse_program(toks).statements)
+func check_findings(path, statements) = do
+    findings = typechecker.check(statements)
     check_print(findings, 0, len(findings))
     concat(path, ": ", to_string(len(findings)), " finding(s)") !> io.say
 end;
 
-// ends_operand lists the token kinds an operand can end with, so a `+` in the
-// operand position that follows is the invalid unary plus.
-func ends_operand(k) = k == "IDENT" || k == "INT" || k == "FLOAT" || k == "STRING" ||
-    k == ")" || k == "]" || k == "}" || k == "TRUE" || k == "FALSE" || k == "EOF";
-
-func bad_unary_plus(toks) = scan_unary(toks, true);
-
-func scan_unary(toks, expect_operand) = match lexer.first(toks)
-    Maybe.None => false
-    Maybe.Some(t) => scan_unary_token(t, lexer.rest(toks), expect_operand);
-
-func scan_unary_token(t, rest_toks, expect_operand) = match t.kind == "EOF"
-    true => false
-    false => scan_unary_after(t, rest_toks, expect_operand);
-
-func scan_unary_after(t, rest_toks, expect_operand) = match t.kind == "+" && expect_operand
-    true => true
-    false => scan_unary(rest_toks, !ends_operand(t.kind));
 
 func check_print(findings, i, n) = match i >= n
     true => 0
