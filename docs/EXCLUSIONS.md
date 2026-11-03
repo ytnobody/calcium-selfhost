@@ -40,7 +40,7 @@ program, which needs both implementations to agree on what a program's output is
 
 The reference schedules these on goroutines and channels and supplies event
 sources such as `schedule.timeout` natively. Reproducing that in Calcium is the
-open design question **D2**; the interpreter does not attempt it.
+open design question **D2**, tracked as issue #3; the interpreter does not attempt it.
 
 `lex`, `fmt` and `check` still compare all six.
 
@@ -55,7 +55,7 @@ open design question **D2**; the interpreter does not attempt it.
 
 These are programs that are *supposed* to fail compilation. Verifying the
 candidate would mean matching the reference's diagnostic text, and `SPEC.md` §3
-declares that text non-contractual (**D13**). The checker itself exists and is
+declares that text non-contractual (**D13**, tracked as issue #2). The checker itself exists and is
 compared on `tests/typecheck/` plus the whole corpus, where it agrees.
 
 `lex`, `fmt` and `check` still compare all four.
@@ -76,6 +76,8 @@ The reference's *top-level* compiler does not register the `__` primitives these
 modules are written against, so running them directly fails there. The candidate
 loads them through its module loader, which does supply the primitives (**D21**),
 so there is nothing to compare against.
+
+Whether a compiled file should be able to carry that list is issue #7.
 
 These files are the densest Calcium in the repository, and they are compared in
 `lex`, `fmt` and `check` like any other file — only the *run* comparison is
