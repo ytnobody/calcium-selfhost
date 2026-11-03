@@ -40,7 +40,9 @@ program, which needs both implementations to agree on what a program's output is
 
 The reference schedules these on goroutines and channels and supplies event
 sources such as `schedule.timeout` natively. Reproducing that in Calcium is the
-open design question **D2**, tracked as issue #3; the interpreter does not attempt it.
+open design question **D2**; `docs/ASYNC.md` records the analysis, the options and why
+it is deferred (issue #3). The compiler emits the opcodes already — `async_timeout.ca`
+compiles — and the VM stops at the first one with `unsupported opcode 51`.
 
 `lex`, `fmt` and `check` still compare all six.
 

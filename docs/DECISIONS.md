@@ -208,6 +208,20 @@ risk the frame limit.
 Verified: 12 KB, 62 KB and 125 KB inputs lex in 0.16 s, 0.75 s and 1.44 s
 (linear), all byte-identical to the reference.
 
+## D24 — Async stays out of scope, with the analysis written down (**accepted**)
+
+The six `async_*` examples need task/scheduler opcodes that are part of the frozen
+bytecode format (`OpSpawn`, `OpStayBegin`, `OpStayGetState`, `OpContinue`,
+`OpStayEnd`) plus a timer source, which the reference supplies as a *native*
+`core.schedule` module. `docs/ASYNC.md` records what that means for this
+implementation: the compiler already emits the opcodes, the VM stops at the first
+one with `unsupported opcode 51`, and the realistic implementation is option A
+(keep the scheduler native, add the opcodes and two or three primitives).
+
+It is deferred because the toolchain self-hosts without it, and because the wait
+primitive would be an upstream FFI change. The trigger to revisit and the
+acceptance criteria are in `docs/ASYNC.md`.
+
 ## D23 — Constraint checks: dynamic done, static open (**partly done**)
 
 Constraints have two halves, and they were both missing.
