@@ -538,57 +538,7 @@ than the ones above.
 `tests/tco.test.ca` is kept *in* the harness rather than excluded: it passes in 94 s,
 and excluding it would hide a real capability behind a timeout.
 
-## D20 — Runtime errors are reported, not dropped (**done**)
-
-The interpreter's dispatch ignored the ok flag on every step, so a `fail` - a
-no-match, or a type error raised by the host - emptied the frames and the run just
-stopped: no message, exit status 0. `test/mod.test.ca` "passed" that way while
-silently truncating.
-
-The state now carries `error`, set by `fail`; `run_with_modules` returns
-`{ok, v, error}` and the CLI prints `runtime error: ...` and exits 1, like a
-compile error. `examples/factorial.ca` is excluded from the VM and .bone stages as
-a consequence: its `match n` arms are `0` and `true`, so nothing matches from n=1,
-and the reference stops after the first line *silently*.
-
-## D21 — The FFI primitives a module names are filled in by the loader (**done**)
-
-The reference registers `__str_contains` and friends as builtins before compiling
-a module. This compiler has no such table, so those names compiled to nothing and
-the call went to whatever was on the stack. The loader now collects the
-`__`-prefixed identifiers from the module's tokens, reserves a global for each, and
-fills the slots with host functions the VM forwards.
-
-`test/mod.test.ca` (the framework's own suite: `like`, `unlike`, `cmp_ok`,
-`is_type`) matches the reference as a result.
-
-## D19 — Interpretation is slow, and that is a measured limit, not a TODO (**accepted**)
-
-One interpreted iteration of a tail-recursive count costs ~0.74 ms (1000 → 0.86 s,
-2000 → 1.53 s, 4000 → 2.98 s, 20000 → 14.8 s: linear, and correct at 20000). One
-*instruction* is ~54 µs, dominated by the reference VM executing the interpreter's
-Calcium - roughly 15-25 host calls per instruction for frame/code/ip plumbing and
-state rebuilds.
-
-Tried and measured as no-ops: a fast path in `put_at`, resolving the module id
-once in `entry_globals`, inlining the opcode-width table instead of calling into
-`bytecode`, and reordering the dispatch match.
-
-What did help: `step_op` handles the opcodes a loop spends its time in
-(`constant`, `get_local`, `set_local`, `get_global`, `dup`, `pop`, arithmetic,
-comparisons, jumps) with the frame, code and ip already in hand, so a stack change
-and an ip change land in one state update instead of two or three. 4000-deep
-count: 3.00 s -> 2.37 s (~20%).
-
-The remaining lever is threading the frame and code through *every* opcode
-handler so they stop re-deriving `frame_cl`/`cl_body`; the same measurement puts
-the remaining cost there.
-
-`tests/tco.test.ca` (50000 deep) is therefore kept *in* the harness rather than
-excluded: it passes, it just takes ~40 s, and excluding it would hide a real
-capability behind a timeout.
-
-## D25 — SH-4 is scoped to correctness, not speed, going forward (**accepted**)
+## D27 — SH-4 is scoped to correctness, not speed, going forward (**accepted**)
 
 D19 already settled that the double-interpretation cost is intrinsic, not a
 TODO. This makes the implication explicit for future work: further VM effort
@@ -601,7 +551,5 @@ start of a performance track — SH-4 is a stretch goal by its own definition
 (`calcium-lang/specs/selfhost-scope.md` §4), and no amount of further tuning
 gets past the double-interpretation ceiling, only amortizes it.
 
-Same reasoning applies to scope decisions still open elsewhere: the LSP (D3)
-and giving `.bone` module information (tracked as a self-hosted-repo issue,
-not a `calcium-lang` decision) both stay deferred rather than built, until a
-concrete need - not "it would be nearly free" - asks for them.
+The same "cheap to add is not a reason to add it" reasoning is why D25 (`.bone`
+module list) and D26 (LSP) both land on deferred rather than built.
