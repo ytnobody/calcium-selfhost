@@ -49,7 +49,8 @@ jobs:
           go build -C oracle-src -o "$RUNNER_TEMP/oracle/calcium" ./cmd/calcium
 
       - name: Sanity-check the oracle
-        run: "$RUNNER_TEMP/oracle/calcium" version
+        run: |
+          "$RUNNER_TEMP/oracle/calcium" version
 
       - name: Run the differential harness
         env:
