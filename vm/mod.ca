@@ -341,7 +341,7 @@ func step_op(st, f, code, ip) = match code[ip]
     bytecode.call() => call_in(st, f, code, ip)
     bytecode.call_effect() => call_in(st, f, code, ip)
     bytecode.tail_call() => tail_call_in(st, f, code, ip)
-    bytecode.ret() => finished_of(op_ret(st, ip))
+    bytecode.ret() => finished_of(op_ret(st, ip, f, code))
     bytecode.add() => binary_in(st, f, ip, numeric("add", lhs(st), rhs(st)))
     bytecode.sub() => binary_in(st, f, ip, numeric("sub", lhs(st), rhs(st)))
     bytecode.mul() => binary_in(st, f, ip, numeric("mul", lhs(st), rhs(st)))
@@ -354,7 +354,7 @@ func step_op(st, f, code, ip) = match code[ip]
     bytecode.greater() => binary_in(st, f, ip, compare("greater", lhs(st), rhs(st)))
     bytecode.less_equal() => binary_in(st, f, ip, compare("less_equal", lhs(st), rhs(st)))
     bytecode.greater_equal() => binary_in(st, f, ip, compare("greater_equal", lhs(st), rhs(st)))
-    _ => finished_of(dispatch(st, code[ip], ip));
+    _ => finished_of(dispatch(st, code[ip], ip, f, code));
 
 func lhs(st) = stack_at(st.stack, st.top - 2);
 func rhs(st) = stack_at(st.stack, st.top - 1);
@@ -441,6 +441,9 @@ end;
 // advance moves the instruction pointer past the instruction at `ip`.
 func advance(st, ip) = set_ip(st, ip + width(cl_body(frame_cl(current(st))), ip));
 
+// advance_in is advance for a caller that already holds the code.
+func advance_in(st, ip, code) = set_ip(st, ip + width(code, ip));
+
 // fail records a runtime error and unwinds every frame, naming the function that
 // was executing so a no-match is diagnosable.
 func fail(st, message) = do
@@ -461,70 +464,70 @@ func failed_message(st, message) = match len(st.frames) == 0
         " at ", to_string(frame_ip(current(st))), ")");
 func done(st) = {ok: true, st: st};
 
-func dispatch(st, op, ip) = match op
-    bytecode.constant() => op_constant(st, ip)
-    bytecode.pop() => op_pop(st, ip)
-    bytecode.dup() => op_dup(st, ip)
-    bytecode.get_local() => op_get_local(st, ip)
-    bytecode.set_local() => op_set_local(st, ip)
-    bytecode.get_global() => op_get_global(st, ip)
-    bytecode.set_global() => op_set_global(st, ip)
-    bytecode.add() => op_numeric(st, ip, "add")
-    bytecode.sub() => op_numeric(st, ip, "sub")
-    bytecode.mul() => op_numeric(st, ip, "mul")
-    bytecode.div() => op_numeric(st, ip, "div")
-    bytecode.mod() => op_numeric(st, ip, "mod")
-    bytecode.pow() => op_numeric(st, ip, "pow")
-    bytecode.neg() => op_unary(st, ip, "neg")
-    bytecode.not() => op_unary(st, ip, "not")
-    bytecode.bit_not() => op_unary(st, ip, "bit_not")
-    bytecode.bit_and() => op_numeric(st, ip, "bit_and")
-    bytecode.bit_or() => op_numeric(st, ip, "bit_or")
-    bytecode.bit_xor() => op_numeric(st, ip, "bit_xor")
-    bytecode.shl() => op_numeric(st, ip, "shl")
-    bytecode.shr() => op_numeric(st, ip, "shr")
-    bytecode.equal() => op_compare(st, ip, "equal")
-    bytecode.not_equal() => op_compare(st, ip, "not_equal")
-    bytecode.less() => op_compare(st, ip, "less")
-    bytecode.greater() => op_compare(st, ip, "greater")
-    bytecode.less_equal() => op_compare(st, ip, "less_equal")
-    bytecode.greater_equal() => op_compare(st, ip, "greater_equal")
+func dispatch(st, op, ip, f, code) = match op
+    bytecode.constant() => op_constant(st, ip, f, code)
+    bytecode.pop() => op_pop(st, ip, f, code)
+    bytecode.dup() => op_dup(st, ip, f, code)
+    bytecode.get_local() => op_get_local(st, ip, f, code)
+    bytecode.set_local() => op_set_local(st, ip, f, code)
+    bytecode.get_global() => op_get_global(st, ip, f, code)
+    bytecode.set_global() => op_set_global(st, ip, f, code)
+    bytecode.add() => op_numeric(st, ip, "add", f, code)
+    bytecode.sub() => op_numeric(st, ip, "sub", f, code)
+    bytecode.mul() => op_numeric(st, ip, "mul", f, code)
+    bytecode.div() => op_numeric(st, ip, "div", f, code)
+    bytecode.mod() => op_numeric(st, ip, "mod", f, code)
+    bytecode.pow() => op_numeric(st, ip, "pow", f, code)
+    bytecode.neg() => op_unary(st, ip, "neg", f, code)
+    bytecode.not() => op_unary(st, ip, "not", f, code)
+    bytecode.bit_not() => op_unary(st, ip, "bit_not", f, code)
+    bytecode.bit_and() => op_numeric(st, ip, "bit_and", f, code)
+    bytecode.bit_or() => op_numeric(st, ip, "bit_or", f, code)
+    bytecode.bit_xor() => op_numeric(st, ip, "bit_xor", f, code)
+    bytecode.shl() => op_numeric(st, ip, "shl", f, code)
+    bytecode.shr() => op_numeric(st, ip, "shr", f, code)
+    bytecode.equal() => op_compare(st, ip, "equal", f, code)
+    bytecode.not_equal() => op_compare(st, ip, "not_equal", f, code)
+    bytecode.less() => op_compare(st, ip, "less", f, code)
+    bytecode.greater() => op_compare(st, ip, "greater", f, code)
+    bytecode.less_equal() => op_compare(st, ip, "less_equal", f, code)
+    bytecode.greater_equal() => op_compare(st, ip, "greater_equal", f, code)
     bytecode.jump() => set_ip_after(st, read_u16(cl_body(frame_cl(current(st))), ip))
-    bytecode.jump_if_false() => op_jump_if(st, ip, false)
-    bytecode.jump_if_true() => op_jump_if(st, ip, true)
-    bytecode.call() => op_call(st, ip, read_u8(cl_body(frame_cl(current(st))), ip))
-    bytecode.call_effect() => op_call(st, ip, read_u8(cl_body(frame_cl(current(st))), ip))
-    bytecode.tail_call() => op_tail_call(st, ip, read_u8(cl_body(frame_cl(current(st))), ip))
-    bytecode.ret() => op_ret(st, ip)
-    bytecode.closure() => op_closure(st, ip)
-    bytecode.get_free() => op_get_free(st, ip)
-    bytecode.array() => op_array(st, ip, read_u16(cl_body(frame_cl(current(st))), ip), false)
-    bytecode.array_concat() => op_array(st, ip, read_u16(cl_body(frame_cl(current(st))), ip), true)
-    bytecode.tuple() => op_tuple(st, ip, read_u16(cl_body(frame_cl(current(st))), ip))
-    bytecode.hash_lit() => op_hash(st, ip, read_u16(cl_body(frame_cl(current(st))), ip))
-    bytecode.index() => op_index(st, ip)
-    bytecode.regex_match() => op_regex_match(st, ip)
-    bytecode.get_member() => op_get_member(st, ip)
-    bytecode.load_module() => op_load_module(st, ip)
-    bytecode.builtin() => op_builtin(st, ip, read_u8(cl_body(frame_cl(current(st))), ip))
-    bytecode.true_() => op_push(st, ip, true)
-    bytecode.false_() => op_push(st, ip, false)
-    bytecode.none() => op_push(st, ip, Maybe.None)
-    bytecode.construct_adt() => op_construct_adt(st, ip)
-    bytecode.construct_maybe_some() => op_construct_maybe_some(st, ip)
-    bytecode.match_adt() => op_match_adt(st, ip)
-    bytecode.wrap_success() => op_wrap(st, ip, true)
-    bytecode.wrap_failure() => op_wrap(st, ip, false)
-    bytecode.is_success() => op_is_wrapped(st, ip, true)
-    bytecode.is_failure() => op_is_wrapped(st, ip, false)
-    bytecode.unwrap() => op_unwrap(st, ip)
-    bytecode.match_fail() => op_match_fail(st, ip)
+    bytecode.jump_if_false() => op_jump_if(st, ip, false, f, code)
+    bytecode.jump_if_true() => op_jump_if(st, ip, true, f, code)
+    bytecode.call() => op_call(st, ip, read_u8(cl_body(frame_cl(current(st))), ip), f, code)
+    bytecode.call_effect() => op_call(st, ip, read_u8(cl_body(frame_cl(current(st))), ip), f, code)
+    bytecode.tail_call() => op_tail_call(st, ip, read_u8(cl_body(frame_cl(current(st))), ip), f, code)
+    bytecode.ret() => op_ret(st, ip, f, code)
+    bytecode.closure() => op_closure(st, ip, f, code)
+    bytecode.get_free() => op_get_free(st, ip, f, code)
+    bytecode.array() => op_array(st, ip, read_u16(cl_body(frame_cl(current(st))), ip), false, f, code)
+    bytecode.array_concat() => op_array(st, ip, read_u16(cl_body(frame_cl(current(st))), ip), true, f, code)
+    bytecode.tuple() => op_tuple(st, ip, read_u16(cl_body(frame_cl(current(st))), ip), f, code)
+    bytecode.hash_lit() => op_hash(st, ip, read_u16(cl_body(frame_cl(current(st))), ip), f, code)
+    bytecode.index() => op_index(st, ip, f, code)
+    bytecode.regex_match() => op_regex_match(st, ip, f, code)
+    bytecode.get_member() => op_get_member(st, ip, f, code)
+    bytecode.load_module() => op_load_module(st, ip, f, code)
+    bytecode.builtin() => op_builtin(st, ip, read_u8(cl_body(frame_cl(current(st))), ip), f, code)
+    bytecode.true_() => op_push(st, ip, true, f, code)
+    bytecode.false_() => op_push(st, ip, false, f, code)
+    bytecode.none() => op_push(st, ip, Maybe.None, f, code)
+    bytecode.construct_adt() => op_construct_adt(st, ip, f, code)
+    bytecode.construct_maybe_some() => op_construct_maybe_some(st, ip, f, code)
+    bytecode.match_adt() => op_match_adt(st, ip, f, code)
+    bytecode.wrap_success() => op_wrap(st, ip, true, f, code)
+    bytecode.wrap_failure() => op_wrap(st, ip, false, f, code)
+    bytecode.is_success() => op_is_wrapped(st, ip, true, f, code)
+    bytecode.is_failure() => op_is_wrapped(st, ip, false, f, code)
+    bytecode.unwrap() => op_unwrap(st, ip, f, code)
+    bytecode.match_fail() => op_match_fail(st, ip, f, code)
     _ => fail(st, concat("unsupported opcode ", to_string(op)));
 
 func set_ip_after(st, ip) = done(set_ip(st, ip));
 
 // A no-match reports the subject, which is what makes this diagnosable.
-func op_match_fail(st, ip) = do
+func op_match_fail(st, ip, f, code) = do
     r = pop_value(st);
     fail(r.st, concat("no match arm matched ", vm_to_string(r.v)))
 end;
@@ -533,8 +536,8 @@ end;
 // Simple opcodes
 // ---------------------------------------------------------------------------
 
-func op_constant(st, ip) = do
-    cl = frame_cl(current(st));
+func op_constant(st, ip, f, code) = do
+    cl = frame_cl(f);
     pool = cl_consts(cl);
     done(advance(push_value(st, constant_value(pool[read_u16(cl_body(cl), ip)], pool)), ip))
 end;
@@ -542,15 +545,15 @@ end;
 // A closure created inside a unit shares that unit's pool; only the top-level
 // closure of a module differs, and its pool is the module's.
 
-func op_pop(st, ip) = done(advance(pop_value(st).st, ip));
+func op_pop(st, ip, f, code) = done(advance_in(pop_value(st).st, ip, code));
 
-func op_dup(st, ip) = done(advance(push_value(st, peek(st)), ip));
+func op_dup(st, ip, f, code) = done(advance(push_value(st, peek(st)), ip));
 
-func op_push(st, ip, v) = done(advance(push_value(st, v), ip));
+func op_push(st, ip, v, f, code) = done(advance_in(push_value(st, v), ip, code));
 
-func op_get_local(st, ip) = do
-    idx = read_u8(cl_body(frame_cl(current(st))), ip);
-    done(advance(push_value(st, stack_at(st.stack, frame_base(current(st)) + idx)), ip))
+func op_get_local(st, ip, f, code) = do
+    idx = read_u8(code, ip);
+    done(advance(push_value(st, stack_at(st.stack, frame_base(f) + idx)), ip))
 end;
 
 func ensure_size(arr, n) = match len(arr) >= n
@@ -563,28 +566,28 @@ func stack_at(arr, i) = match i >= 0 && i < len(arr)
     true => arr[i]
     false => 0;
 
-func op_set_local(st, ip) = do
-    idx = read_u8(cl_body(frame_cl(current(st))), ip);
+func op_set_local(st, ip, f, code) = do
+    idx = read_u8(code, ip);
     r = pop_value(st);
-    target = frame_base(current(st)) + idx;
+    target = frame_base(f) + idx;
     done(advance(set_state(r.st, put_at(r.st.stack, target, r.v), r.st.top, r.st.frames, r.st.last, r.st.globals), ip))
 end;
 
 // A global slot can be read before it is written: the compiler predeclares every
 // top-level name so functions can refer to each other, which allocates indices
 // before the assignments that fill them.
-func op_get_global(st, ip) = do
-    cl = frame_cl(current(st));
+func op_get_global(st, ip, f, code) = do
+    cl = frame_cl(f);
     idx = read_u16(cl_body(cl), ip);
     g = frame_globals(current(st));
     value = match len(g) > 0
         true => stack_at(g, idx)
         false => stack_at(st.globals, idx);
-    done(advance(push_value(st, value), ip))
+    done(advance_in(push_value(st, value), ip, code))
 end;
 
-func op_set_global(st, ip) = do
-    idx = read_u16(cl_body(frame_cl(current(st))), ip);
+func op_set_global(st, ip, f, code) = do
+    idx = read_u16(code, ip);
     r = pop_value(st);
     done(advance(set_globals(r.st, put_at(r.st.globals, idx, r.v)), ip))
 end;
@@ -594,19 +597,18 @@ func set_globals(st, globals) = set_state(st, st.stack, st.top, st.frames, st.la
 // set_global_at writes one global slot, padding when the index is past the end.
 func set_global_at(st, index, value) = set_globals(st, put_at(st.globals, index, value));
 
-func op_get_free(st, ip) = do
-    idx = read_u8(cl_body(frame_cl(current(st))), ip);
-    done(advance(push_value(st, cl_free(frame_cl(current(st)))[idx]), ip))
+func op_get_free(st, ip, f, code) = do
+    idx = read_u8(code, ip);
+    done(advance(push_value(st, cl_free(frame_cl(f))[idx]), ip))
 end;
 
-func op_closure(st, ip) = do
-    code = cl_body(frame_cl(current(st)));
+func op_closure(st, ip, f, code) = do
     idx = read_u16(code, ip);
     count = code[ip + 3];
     frees = pop_n(st, count);
-    outer = frame_cl(current(st));
+    outer = frame_cl(f);
     cl = Closure(constant_record(cl_consts(outer)[idx]), frees.items, cl_consts(outer), cl_mod(outer));
-    done(advance(push_value(frees.st, cl), ip))
+    done(advance_in(push_value(frees.st, cl), ip, code))
 end;
 
 func constant_record(c) = match c
@@ -633,7 +635,7 @@ func push_front_loop(arr, v, i, n, acc) = match i >= n
 // Arithmetic and comparison
 // ---------------------------------------------------------------------------
 
-func op_numeric(st, ip, kind) = do
+func op_numeric(st, ip, kind, f, code) = do
     r = pop_value(st);
     l = pop_value(r.st);
     done(advance(push_value(l.st, numeric(kind, l.v, r.v)), ip))
@@ -653,7 +655,7 @@ func numeric(kind, a, b) = match kind
     "shr" => a >> b
     _ => 0;
 
-func op_unary(st, ip, kind) = do
+func op_unary(st, ip, kind, f, code) = do
     r = pop_value(st);
     done(advance(push_value(r.st, unary(kind, r.v)), ip))
 end;
@@ -664,7 +666,7 @@ func unary(kind, v) = match kind
     "bit_not" => ^v
     _ => v;
 
-func op_compare(st, ip, kind) = do
+func op_compare(st, ip, kind, f, code) = do
     r = pop_value(st);
     l = pop_value(r.st);
     done(advance(push_value(l.st, compare(kind, l.v, r.v)), ip))
@@ -683,15 +685,15 @@ func compare(kind, a, b) = match kind
 // Jumps
 // ---------------------------------------------------------------------------
 
-func op_jump_if(st, ip, want_true) = do
+func op_jump_if(st, ip, want_true, f, code) = do
     r = pop_value(st);
-    target = read_u16(cl_body(frame_cl(current(st))), ip);
+    target = read_u16(code, ip);
     jump = match r.v
         true => want_true
         false => !want_true;
     match jump
         true => done(set_ip(r.st, target))
-        false => done(advance(r.st, ip))
+        false => done(advance_in(r.st, ip, code))
 end;
 
 // ---------------------------------------------------------------------------
@@ -704,8 +706,8 @@ end;
 //
 // run_callee is effectful (a host call prints), so its result can arrive wrapped
 // in success/failure and has to be unwrapped.
-func op_call(st, ip, nargs) = do
-    st1 = advance(st, ip);
+func op_call(st, ip, nargs, f, code) = do
+    st1 = advance_in(st, ip, code);
     base = st1.top - nargs;
     callee = st1.stack[base - 1];
     apply(unwrap_callee(run_callee(st1, callee, base, nargs, false), st1))
@@ -716,7 +718,7 @@ end;
 // no frame to replace, so it has to return from the current frame - otherwise the
 // frame would keep executing with the callee's result on top of its stack, and any
 // caller looping until the frame count drops (map, filter, reduce) would spin.
-func op_tail_call(st, ip, nargs) = do
+func op_tail_call(st, ip, nargs, f, code) = do
     base = st.top - nargs;
     callee = st.stack[base - 1];
     r = unwrap_callee(run_callee(st, callee, base, nargs, true), st);
@@ -793,7 +795,7 @@ func move_value(arr, from, to, i, n) = match i >= to && i < to + n
 
 // A return removes the frame, drops the callee and argument slots, and leaves the
 // return value in their place for the caller.
-func op_ret(st, ip) = do
+func op_ret(st, ip, f, code) = do
     r = pop_value(st);
     return_value(r.st, r.v)
 end;
@@ -811,16 +813,16 @@ end;
 // Containers
 // ---------------------------------------------------------------------------
 
-func op_array(st, ip, n, concat) = do
+func op_array(st, ip, n, concat, f, code) = do
     r = pop_n(st, n);
-    done(advance(push_value(r.st, r.items), ip))
+    done(advance_in(push_value(r.st, r.items), ip, code))
 end;
 
 // A tuple is represented as an array: Calcium has no way to build a tuple value
 // dynamically, and the difference is only visible in to_string.
-func op_tuple(st, ip, n) = op_array(st, ip, n, false);
+func op_tuple(st, ip, n, f, code) = op_array(st, ip, n, false);
 
-func op_hash(st, ip, n) = do
+func op_hash(st, ip, n, f, code) = do
     r = pop_n(st, n * 2);
     done(advance(push_value(r.st, build_hash(r.items, 0, len(r.items), {})), ip))
 end;
@@ -829,7 +831,7 @@ func build_hash(items, i, n, acc) = match i + 1 >= n
     true => acc
     false => build_hash(items, i + 2, n, hash_set(acc, items[i], items[i + 1]));
 
-func op_index(st, ip) = do
+func op_index(st, ip, f, code) = do
     idx = pop_value(st);
     obj = pop_value(idx.st);
     done(advance(push_value(obj.st, index_into(obj.v, idx.v)), ip))
@@ -854,7 +856,7 @@ func index_container(obj, idx) = match types.is_array(obj)
         false => obj;
 
 // `left ~ right`: the string matches the regex.
-func op_regex_match(st, ip) = do
+func op_regex_match(st, ip, f, code) = do
     r = pop_value(st);
     l = pop_value(r.st);
     done(advance(push_value(l.st, regex_matches(l.v, r.v)), ip))
@@ -864,8 +866,8 @@ func regex_matches(s, rx) = match types.is_string(s)
     true => regex.matches(s, rx)
     false => false;
 
-func op_get_member(st, ip) = do
-    name = member_name(frame_cl(current(st)), read_u16(cl_body(frame_cl(current(st))), ip));
+func op_get_member(st, ip, f, code) = do
+    name = member_name(frame_cl(f), read_u16(code, ip));
     obj = pop_value(st);
     done(advance(push_value(obj.st, member_of(obj.v, name)), ip))
 end;
@@ -898,8 +900,8 @@ func module_or_hash(obj, name) = match get(obj, "__module", "")
 
 // A local module the loader prepared is pushed directly; anything else keeps the
 // path marker so member access can reach the native registry.
-func op_load_module(st, ip) = do
-    path = member_name(frame_cl(current(st)), read_u16(cl_body(frame_cl(current(st))), ip));
+func op_load_module(st, ip, f, code) = do
+    path = member_name(frame_cl(f), read_u16(code, ip));
     done(advance(push_value(st, module_value(st, path)), ip))
 end;
 
@@ -909,15 +911,14 @@ func module_value(st, path) = match has(st.modules, path)
     true => get(st.modules, path, {})
     false => {"__module": path};
 
-func op_builtin(st, ip, index) = done(advance(push_value(st, BuiltinFn(index)), ip));
+func op_builtin(st, ip, index, f, code) = done(advance(push_value(st, BuiltinFn(index)), ip));
 
 // ---------------------------------------------------------------------------
 // ADTs and Result values
 // ---------------------------------------------------------------------------
 
-func op_construct_adt(st, ip) = do
-    code = cl_body(frame_cl(current(st)));
-    tag = member_name(frame_cl(current(st)), read_u16(code, ip));
+func op_construct_adt(st, ip, f, code) = do
+    tag = member_name(frame_cl(f), read_u16(code, ip));
     arity = code[ip + 3];
     r = pop_n(st, arity);
     done(advance(push_value(r.st, make_adt(tag, r.items)), ip))
@@ -936,13 +937,13 @@ end;
 
 // OpConstructMaybeSome builds the built-in Maybe.Some(value), which is a native
 // Calcium value rather than one of this interpreter's ADTs.
-func op_construct_maybe_some(st, ip) = do
+func op_construct_maybe_some(st, ip, f, code) = do
     r = pop_value(st);
     done(advance(push_value(r.st, Maybe.Some(r.v)), ip))
 end;
 
-func op_match_adt(st, ip) = do
-    expected = member_name(frame_cl(current(st)), read_u16(cl_body(frame_cl(current(st))), ip));
+func op_match_adt(st, ip, f, code) = do
+    expected = member_name(frame_cl(f), read_u16(code, ip));
     r = pop_value(st);
     done(advance(push_value(r.st, adt_matches(r.v, expected)), ip))
 end;
@@ -951,7 +952,7 @@ func adt_matches(v, expected) = match v
     AdtVal(type_name, tag, items) => tag == expected || concat(type_name, ".", tag) == expected
     _ => false;
 
-func op_wrap(st, ip, ok) = do
+func op_wrap(st, ip, ok, f, code) = do
     r = pop_value(st);
     done(advance(push_value(r.st, wrap_value(r.v, ok)), ip))
 end;
@@ -964,7 +965,7 @@ func wrap_value(v, ok) = match ok
     true => success(v)
     false => failure(v);
 
-func op_is_wrapped(st, ip, want_success) = do
+func op_is_wrapped(st, ip, want_success, f, code) = do
     r = pop_value(st);
     done(advance(push_value(r.st, is_wrapped(r.v, want_success)), ip))
 end;
@@ -974,7 +975,7 @@ func is_wrapped(v, want_success) = match want_success
     true => types.type_of(v) == "success"
     false => types.type_of(v) == "failure";
 
-func op_unwrap(st, ip) = do
+func op_unwrap(st, ip, f, code) = do
     r = pop_value(st);
     done(advance(push_value(r.st, unwrapped(r.v)), ip))
 end;
