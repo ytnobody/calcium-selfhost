@@ -48,7 +48,7 @@ wrappers (any host predicate cannot see them), `to_string` has to render them by
 (`vm_to_string`), and the module registry is a table of `HostFn`s rather than native
 module objects.
 
-## D2 — Async runtime (open, blocks SH-4)
+## D2 — Async runtime (**deferred**, see D24)
 
 The reference VM has ~35 `go func`/`chan` sites implementing the async runtime,
 and Calcium's own `async.*` is built on top of it. A Calcium VM would nest async
@@ -57,6 +57,10 @@ inside async.
 Options: keep the scheduler native (opaque handles, D1) or implement it in
 Calcium on top of the host scheduler. The latter is the more interesting result
 but has a much worse failure mode.
+
+**Resolved as "deferred"** in D24, with the full analysis in `docs/ASYNC.md`: the
+toolchain self-hosts without async, and the wait primitive would be an upstream FFI
+change. The recommended path if it is ever needed is the first option.
 
 ## D3 — LSP timing (open, no blocker)
 
