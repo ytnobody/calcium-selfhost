@@ -284,11 +284,28 @@ now implements the opcode, mirrors the reference's truthiness, and the constrain
 predicates are type-guarded and wrapper-aware. The three `tests/*_constraint.test.ca`
 suites match the reference as a result.
 
-**Static (open, issue #9).** The reference rejects `safe_sqrt(-4)` at *compile* time
-by evaluating constraints over literal arguments (`pkg/compiler/static_constraint.go`,
-827 Go lines: literal evaluation, const tracking, composite constraint expansion).
-The candidate checks at run time, so the value is a `failure(...)` instead of a
-compile error. Porting that evaluator is the remaining half.
+**Static (decided: not worth doing now).** The reference rejects `safe_sqrt(-4)` at
+*compile* time by evaluating constraints over literal arguments
+(`pkg/compiler/static_constraint.go`, 827 Go lines: literal evaluation, const
+tracking, composite constraint expansion). The candidate checks at run time instead,
+so the outcome is `failure(-4)` rather than a compile error.
+
+Three measurements say porting it buys nothing:
+
+1. **`check` already agrees.** Both implementations report
+   `examples/constraint.ca: 0 finding(s)` — the static check is not part of `check`.
+2. **The compared output cannot be matched.** The reference's message is
+   `line 71, column 20:` + a caret line + the source line + the constraint text, and
+   the harness compares raw output. Reproducing it needs the *position of the
+   argument expression*, and the AST carries no positions for expressions at all
+   (`ast/mod.ca` has no line/column fields; only annotations do).
+3. **The file is excluded anyway.** `examples/constraint.ca` is out of the `vm`,
+   `compile` and `.bone` stages because the reference itself exits non-zero on it.
+
+So the static evaluator would add ~800 lines of literal evaluation and still compare
+zero additional behaviour. It becomes worth doing if expressions ever gain positions
+for another reason — better diagnostics generally would be that reason — at which
+point the evaluator can follow the decomposition in issue #2.
 
 ## D13 — The type checker (**done**)
 
