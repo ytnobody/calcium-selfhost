@@ -240,6 +240,32 @@ risk the frame limit.
 Verified: 12 KB, 62 KB and 125 KB inputs lex in 0.16 s, 0.75 s and 1.44 s
 (linear), all byte-identical to the reference.
 
+## D26 — The LSP is not part of the target, but it is the natural next stage (**accepted**)
+
+The reference ships `calcium-lsp` (298 lines of server, 379 of tests, 1,653 across the
+package). It depends only on `pkg/ast`, `pkg/lexer`, `pkg/parser` and `pkg/token` — the
+whole front end, which this repository already has.
+
+Feasibility is not the question. A self-hosted LSP would be *cheaper* than the VM was:
+`core.json` is available (forwarded by the VM bridge), stdio is available through
+`core.io`/`core.os`, and the front end is done. It could be verified the same way
+everything else is: drive both servers with the same JSON-RPC messages and compare the
+responses.
+
+It is out of scope because of what it is, not what it costs:
+
+- It is a *client* of the toolchain, not part of it. The target was lexer → parser →
+  formatter → type checker → compiler → VM, and that is complete.
+- It would add a second protocol surface and a long-lived process to something that is
+  currently a batch tool: a new failure mode (partial documents, cancellation,
+  incremental sync) that the corpus cannot exercise.
+- Deciding to have one is a product decision, not a technical one, and nothing in the
+  current deliverable depends on it.
+
+If editor support is wanted, this is the plan: a `lsp` component next to `typechecker`,
+a `calcium-lsp` entry point, and a harness stage that replays a recorded JSON-RPC
+session against both servers.
+
 ## D25 — `.bone` records no module list (**accepted**)
 
 A compiled program names its modules only where it uses them: `OpLoadModule` carries
