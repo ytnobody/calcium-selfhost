@@ -16,7 +16,7 @@ PASS (229 passed, 0 stage(s) skipped, 33 corpus file(s) excluded)
 ```
 
 The 33 is a count of *stage exclusions*, not of files: a file excluded from both
-the `vm` and the `bone` stage counts twice. **23 distinct files** are affected.
+the `vm` and the `bone` stage counts twice. **22 distinct files** are affected.
 
 | Stage | Exclusions |
 |---|---|
