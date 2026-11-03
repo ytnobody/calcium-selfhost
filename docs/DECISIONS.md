@@ -432,6 +432,78 @@ fills the slots with host functions the VM forwards.
 
 ## D19 — Interpretation is slow, and that is a measured limit, not a TODO (**accepted**)
 
+**Current measurements** (re-measured after the fusion work; see below for the
+method):
+
+| Quantity | Value |
+|---|---|
+| tail-recursive `count`, 1000 / 2000 / 4000 deep | 0.60 s / 1.16 s / 2.37 s |
+| per iteration (slope 1000→4000) | **0.605 ms** (was 0.74 ms) |
+| instructions per iteration | 21 (measured: 21028 steps for n=1000, 28 for n=0) |
+| per instruction | **~25-28 µs** (was ~54 µs) |
+| `tests/tco.test.ca` (50000 deep) | 94 s |
+| whole harness, local | 3 m 44 s |
+| whole harness, CI runner | **114 s** |
+
+The budget for the harness is **five minutes in CI**; it currently takes under two.
+
+**Method** (so the numbers can be reproduced): the step count comes from
+`tools/trace.ca <file> 100000 | grep -c '^step'`, which prints one line per
+instruction; the per-instruction figure is the marginal wall-clock time between two
+depths divided by the marginal step count, which removes module loading (~0.1 s,
+28 steps) from the measurement. Wall-clock only: nothing here is a profiler.
+
+The cost is intrinsic to writing an interpreter that runs on another interpreter:
+one step of this VM is itself ~20-40 instructions of the reference VM's dispatch.
+
+**What helped** (each measured):
+
+- `step_op` handles the opcodes a loop spends its time in (`constant`,
+  `get_local`, `set_local`, `get_global`, `dup`, `pop`, arithmetic, comparisons,
+  jumps, `call`, `tail_call`) with the frame and code already in hand, so a stack
+  change and an ip change land in one state update instead of two or three.
+- every remaining handler receives `f` and `code` as parameters instead of
+  re-deriving `frame_cl(current(st))`/`cl_body(...)`/`frame_base(...)`, and
+  `advance_in` skips the state walk for the instruction width.
+
+**What did not help** (each measured as a no-op): a fast path in `put_at`, resolving
+the module id once in `entry_globals`, inlining the opcode-width table instead of
+calling into `bytecode`, and reordering the dispatch match.
+
+**What is left**: the state is a 7-field record that is rebuilt 2-3 times per
+instruction (`push_value`, `pop_value`, `set_ip`). Fusing those is the next lever and
+would need the hot handlers to write the whole state once, which is a larger change
+than the ones above.
+
+`tests/tco.test.ca` is kept *in* the harness rather than excluded: it passes in 94 s,
+and excluding it would hide a real capability behind a timeout.
+
+## D20 — Runtime errors are reported, not dropped (**done**)
+
+The interpreter's dispatch ignored the ok flag on every step, so a `fail` - a
+no-match, or a type error raised by the host - emptied the frames and the run just
+stopped: no message, exit status 0. `test/mod.test.ca` "passed" that way while
+silently truncating.
+
+The state now carries `error`, set by `fail`; `run_with_modules` returns
+`{ok, v, error}` and the CLI prints `runtime error: ...` and exits 1, like a
+compile error. `examples/factorial.ca` is excluded from the VM and .bone stages as
+a consequence: its `match n` arms are `0` and `true`, so nothing matches from n=1,
+and the reference stops after the first line *silently*.
+
+## D21 — The FFI primitives a module names are filled in by the loader (**done**)
+
+The reference registers `__str_contains` and friends as builtins before compiling
+a module. This compiler has no such table, so those names compiled to nothing and
+the call went to whatever was on the stack. The loader now collects the
+`__`-prefixed identifiers from the module's tokens, reserves a global for each, and
+fills the slots with host functions the VM forwards.
+
+`test/mod.test.ca` (the framework's own suite: `like`, `unlike`, `cmp_ok`,
+`is_type`) matches the reference as a result.
+
+## D19 — Interpretation is slow, and that is a measured limit, not a TODO (**accepted**)
+
 One interpreted iteration of a tail-recursive count costs ~0.74 ms (1000 → 0.86 s,
 2000 → 1.53 s, 4000 → 2.98 s, 20000 → 14.8 s: linear, and correct at 20000). One
 *instruction* is ~54 µs, dominated by the reference VM executing the interpreter's
