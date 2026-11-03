@@ -1,6 +1,10 @@
 name: CI
 
 on:
+  # `workflow_dispatch` exists so a run can be started by hand: a failed run whose
+  # cause was outside the repository (the oracle pin, a flaky network) cannot be
+  # retried through the API.
+  workflow_dispatch:
   push:
     branches: [main, develop]
   pull_request:
