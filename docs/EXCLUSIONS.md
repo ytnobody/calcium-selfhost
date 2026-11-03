@@ -12,11 +12,11 @@ $ VERBOSE=1 bash tests/differential.sh 2>&1 | grep '^exclude'
 Current state:
 
 ```
-PASS (226 passed, 0 stage(s) skipped, 36 corpus file(s) excluded)
+PASS (229 passed, 0 stage(s) skipped, 33 corpus file(s) excluded)
 ```
 
-The 36 is a count of *stage exclusions*, not of files: a file excluded from both
-the `vm` and the `bone` stage counts twice. **25 distinct files** are affected.
+The 33 is a count of *stage exclusions*, not of files: a file excluded from both
+the `vm` and the `bone` stage counts twice. **23 distinct files** are affected.
 
 | Stage | Exclusions |
 |---|---|
@@ -24,7 +24,7 @@ the `vm` and the `bone` stage counts twice. **25 distinct files** are affected.
 | `fmt` | 1 |
 | `check` | 0 |
 | `compile` | 16 |
-| `vm` | 11 |
+| `vm` | 8 |
 | `bone` | 8 |
 
 Note what this means: `lex` and `check` compare **every** corpus file, and `fmt`

@@ -208,6 +208,25 @@ risk the frame limit.
 Verified: 12 KB, 62 KB and 125 KB inputs lex in 0.16 s, 0.75 s and 1.44 s
 (linear), all byte-identical to the reference.
 
+## D23 — Constraint checks: dynamic done, static open (**partly done**)
+
+Constraints have two halves, and they were both missing.
+
+**Dynamic (done).** `OpCheckConstraint` was not implemented in the VM, so any
+`value |> Constraint?` aborted with `unsupported opcode 46`; and the built-in type
+constraints (`Int?`, `Function?`, `Positive?`, …) were registered as builtins 16-34
+but implemented with unguarded comparisons (`args[0] > 0` raises on a string) and
+with `types.is_function`, which cannot see the interpreter's own closures. The VM
+now implements the opcode, mirrors the reference's truthiness, and the constraint
+predicates are type-guarded and wrapper-aware. The three `tests/*_constraint.test.ca`
+suites match the reference as a result.
+
+**Static (open, issue #9).** The reference rejects `safe_sqrt(-4)` at *compile* time
+by evaluating constraints over literal arguments (`pkg/compiler/static_constraint.go`,
+827 Go lines: literal evaluation, const tracking, composite constraint expansion).
+The candidate checks at run time, so the value is a `failure(...)` instead of a
+compile error. Porting that evaluator is the remaining half.
+
 ## D13 — The type checker (**done**)
 
 Implemented, with the verification gap addressed:

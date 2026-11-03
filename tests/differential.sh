@@ -233,9 +233,6 @@ run_fmt() {
 #                  the open question D2; the interpreter does not attempt it.
 #   constraint.ca  needs the static constraint checker (D13).
 #
-#   *_constraint.test.ca
-#                  need the static checker as well (D13): they assert on the
-#                  reference's compile errors, whose text is not contractual.
 #   tco.test.ca    runs: correct but slow. One interpreted iteration costs ~0.75 ms
 #                  (measured, linear; 20000 deep returns the right answer in 15 s),
 #                  so this case alone takes ~40 s. There is no timeout here, only
@@ -257,8 +254,6 @@ vm_excluded() {
     case "$(basename "$1")" in
         async_*.ca) EXCLUDE_REASON="async: needs the host event scheduler (D2)"; return 0 ;;
         constraint.ca) EXCLUDE_REASON="needs the static constraint checker (D13)"; return 0 ;;
-        constraint.test.ca|function_constraint.test.ca|primitive_constraint.test.ca)
-            EXCLUDE_REASON="needs the static constraint checker (D13)"; return 0 ;;
         # factorial.ca contains a `match n` whose arms are `0` and `true`; from n=1
         # no arm matches. The reference stops after the first line and still exits 0
         # because its VM drops the runtime error silently. The candidate reports the

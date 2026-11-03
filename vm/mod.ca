@@ -356,6 +356,12 @@ func step_op(st, f, code, ip) = match code[ip]
     bytecode.greater_equal() => binary_in(st, f, ip, compare("greater_equal", lhs(st), rhs(st)))
     _ => finished_of(dispatch(st, code[ip], ip, f, code));
 
+// is_function_value recognises the interpreter's own callable wrappers, which the
+// host's predicate cannot see.
+func is_function_value(args) = match len(args) > 0 && is_callable(args[0])
+    true => true
+    false => call_n(types.is_function, args);
+
 func lhs(st) = stack_at(st.stack, st.top - 2);
 func rhs(st) = stack_at(st.stack, st.top - 1);
 
@@ -508,6 +514,7 @@ func dispatch(st, op, ip, f, code) = match op
     bytecode.index() => op_index(st, ip, f, code)
     bytecode.regex_match() => op_regex_match(st, ip, f, code)
     bytecode.get_member() => op_get_member(st, ip, f, code)
+    bytecode.check_constraint() => op_check_constraint(st, ip, f, code)
     bytecode.load_module() => op_load_module(st, ip, f, code)
     bytecode.builtin() => op_builtin(st, ip, read_u8(cl_body(frame_cl(current(st))), ip), f, code)
     bytecode.true_() => op_push(st, ip, true, f, code)
@@ -913,6 +920,33 @@ func module_value(st, path) = match has(st.modules, path)
 
 func op_builtin(st, ip, index, f, code) = done(advance(push_value(st, BuiltinFn(index)), ip));
 
+// check_constraint pops the constraint's result and the value it was checked
+// against, and wraps the value: a parameter that violates its constraint becomes a
+// failure instead of aborting.
+func op_check_constraint(st, ip, f, code) = do
+    r = pop_value(st);
+    v = pop_value(r.st);
+    wrapped = match truthy(r.v)
+        true => success(v.v)
+        false => failure(v.v);
+    done(advance_in(push_value(v.st, wrapped), ip, code))
+end;
+
+// truthy mirrors the reference's IsTruthy: everything that is not an explicitly
+// empty atom is truthy, including ADTs such as Maybe.None.
+func truthy(v) = match types.is_bool(v)
+    true => v
+    false => truthy_non_bool(v);
+
+func truthy_non_bool(v) = match types.type_of(v)
+    "success" => true
+    "failure" => false
+    "int" => v != 0
+    "float" => v != 0
+    "string" => v != ""
+    "array" => len(v) > 0
+    _ => true;
+
 // ---------------------------------------------------------------------------
 // ADTs and Result values
 // ---------------------------------------------------------------------------
@@ -1097,6 +1131,37 @@ func reduce_loop(st, fn, arr, acc, i, n) = match i >= n
         reduce_loop(r.st, fn, arr, r.v, i + 1, n)
     end;
 
+// The named constraints are false for a value of the wrong type, as in the
+// reference; comparing a string with 0 would be a runtime error here.
+func constraint_number(v, kind) = match types.is_number(v)
+    true => constraint_number_1(v, kind)
+    false => false;
+
+func constraint_number_1(v, kind) = match kind
+    "nonzero" => v != 0
+    "positive" => v > 0
+    "nonnegative" => v >= 0
+    // A Calcium float cannot be NaN or infinite without arithmetic that the
+    // interpreter's operator set cannot produce, so a number is finite.
+    _ => true;
+
+func constraint_int(v, kind) = match types.is_int(v)
+    true => v >= 0
+    false => false;
+
+// NonEmpty/Empty apply to strings, arrays and hashes; anything else is neither.
+func constraint_sized(v, want_non_empty) = match types.is_string(v)
+    true => non_empty_compare(v != "", want_non_empty)
+    false => constraint_sized_container(v, want_non_empty);
+
+func constraint_sized_container(v, want_non_empty) = match types.is_array(v) || types.is_hash(v)
+    true => non_empty_compare(len(v) > 0, want_non_empty)
+    false => false;
+
+func non_empty_compare(non_empty, want_non_empty) = match want_non_empty
+    true => non_empty
+    false => !non_empty;
+
 func apply_builtin(name, args) = match name
     "len" => len_of(args[0])
     "get" => builtin_get(args)
@@ -1118,15 +1183,15 @@ func apply_builtin(name, args) = match name
     "Array" => types.is_array(args[0])
     "Hash" => types.is_hash(args[0])
     "Tuple" => types.is_array(args[0])
-    "Function" => types.is_function(args[0])
+    "Function" => is_callable(args[0])
     "Number" => types.is_number(args[0])
-    "NonZero" => args[0] != 0
-    "Positive" => args[0] > 0
-    "NonNegative" => args[0] >= 0
-    "Natural" => args[0] >= 0
-    "Finite" => true
-    "NonEmpty" => len_of(args[0]) > 0
-    "Empty" => len_of(args[0]) == 0
+    "NonZero" => constraint_number(args[0], "nonzero")
+    "Positive" => constraint_number(args[0], "positive")
+    "NonNegative" => constraint_number(args[0], "nonnegative")
+    "Natural" => constraint_int(args[0], "nonnegative")
+    "Finite" => constraint_number(args[0], "finite")
+    "NonEmpty" => constraint_sized(args[0], true)
+    "Empty" => constraint_sized(args[0], false)
     _ => failure(concat("unsupported builtin: ", name));
 
 // get(collection, key) yields a Maybe; the three-argument form yields the value
@@ -1300,7 +1365,7 @@ func! host_apply(name, args) = match name
     "core.types:is_bool" => host_ok(call_n(types.is_bool, args))
     "core.types:is_array" => host_ok(call_n(types.is_array, args))
     "core.types:is_hash" => host_ok(call_n(types.is_hash, args))
-    "core.types:is_function" => host_ok(call_n(types.is_function, args))
+    "core.types:is_function" => host_ok(is_function_value(args))
     "core.types:is_number" => host_ok(call_n(types.is_number, args))
     "core.types:to_int" => host_ok(call_n(types.to_int, args))
     "core.types:to_float" => host_ok(call_n(types.to_float, args))
