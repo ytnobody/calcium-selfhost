@@ -9,7 +9,8 @@ interpreter runs the compiled programs, including every suite file that matches 
 reference line for line; and `run <file.bone>` reads the compiled format back. The harness reports
 `226 passed, 0 skipped, 36 excluded` - the exclusions are the three
 static-constraint suites (out of scope by decision, `docs/DECISIONS.md` D13).
-See `SPEC.md` for the stage plan and D19 for the one file that is slow.
+See `SPEC.md` for the stage plan, `docs/EXCLUSIONS.md` for every file the
+harness cannot compare and why, and D19 for the one file that is slow.
 
 The Go implementation in [`calcium-lang`](https://github.com/ytnobody/calcium-lang)
 is the **reference implementation** and the source of truth for the language

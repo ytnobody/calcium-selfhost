@@ -65,3 +65,7 @@ violations; `examples/fibonacci.ca` rebinds an immutable variable.)
    landed yet must *skip*, not pass silently.
 3. Compare behaviour, not implementation output, unless the artifact is
    canonical (like formatted source).
+
+Every file the harness cannot compare is listed in
+[`../docs/EXCLUSIONS.md`](../docs/EXCLUSIONS.md) with its reason; `VERBOSE=1`
+prints the same list from a run.
