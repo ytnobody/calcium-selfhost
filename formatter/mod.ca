@@ -235,7 +235,7 @@ func case_body(pattern, guard, body, is_default, d) = do
     g = match guard
         Expr.EWild => ""
         _ => concat(" if ", expr(guard, d))
-    concat(p, g, " => ", expr(body, d))
+    concat(p, g, " => ", body_expr(body, d))
 end;
 
 func ctor_pattern(type_name, name, fields, d) = do
@@ -249,9 +249,16 @@ end;
 
 func effect_handle(subject, sv, sb, fv, fb, d) = concat(
     expr(subject, d), " !? {\n",
-    indent(d + 1), "success(", sv, ") => ", expr(sb, d), "\n",
-    indent(d + 1), "failure(", fv, ") => ", expr(fb, d), "\n",
+    indent(d + 1), "success(", sv, ") => ", body_expr(sb, d), "\n",
+    indent(d + 1), "failure(", fv, ") => ", body_expr(fb, d), "\n",
     indent(d), "}");
+
+// A match used as a case body needs a column of its own: its arms are indented one
+// level below the case, and if they landed on this match's arm column the output would
+// be ambiguous - and rejected by the nested-match rule.
+func body_expr(body, d) = match body
+    Expr.EMatch(subject, cases) => match_text(subject, cases, d + 1)
+    _ => expr(body, d);
 
 // do_text renders `do`, the statements, the final expression, then `end`.
 func do_text(statements, final, d) = concat(

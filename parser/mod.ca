@@ -642,34 +642,40 @@ func parse_interp_parts_after(toks, acc, expected) = match expected == "STRING_T
 // `match subject` followed by `pattern => body` arms.
 func parse_match(toks) = do
     subject = parse_expression(rest(toks), 1)
-    cases = parse_cases(subject.t, [])
+    cases = parse_cases(subject.t, [], 0)
     res(ast.EMatch(subject.e, cases.cases), cases.t)
 end;
 
-func parse_cases(toks, acc) = match case_ends(toks)
+// column is this match's first arm column, fixed once the first case is seen. A case
+// indented further left belongs to an enclosing match: an arm body that is itself a
+// match would otherwise swallow the enclosing match's remaining arms, which is what
+// `match v >= 0 / true => match ... / false => ...` needs.
+func parse_cases(toks, acc, column) = match case_ends(toks, column)
     true => {cases: acc, t: toks}
-    false => parse_case(toks, acc);
+    false => parse_case(toks, acc, column);
 
-// A case list ends at a delimiter or at a closing keyword.
-func case_ends(toks) = match kind(toks)
-    "EOF" => true
-    ";" => true
-    ")" => true
-    "]" => true
-    "}" => true
-    "," => true
-    "end" => true
-    _ => false;
+// case_ends reports whether the case list is finished, either at a delimiter or at a
+// case that is indented left of this match's own arms.
+func case_ends(toks, column) = match kind(toks) == "EOF" || kind(toks) == ";" || kind(toks) == ")" ||
+    kind(toks) == "]" || kind(toks) == "}" || kind(toks) == "," || kind(toks) == "end"
+    true => true
+    false => column > 0 && tok_column(toks) < column;
 
-func parse_case(toks, acc) = do
+func parse_case(toks, acc, column) = do
     p = parse_case_pattern(toks)
     guard = parse_case_guard(p.t)
     arrow = expect(guard.t, "=>")
     body = parse_expression(arrow, 2)
     is_default = case_is_wild(p.e)
-    acc2 = push(acc, ast.Case(p.e, guard.g, body.e, is_default))
-    parse_cases(body.t, acc2)
+    own = match column > 0
+        true => column
+        false => cur(toks).column;
+    acc2 = push(acc, ast.Case(p.e, guard.g, body.e, is_default));
+    parse_cases(body.t, acc2, own)
 end;
+
+func tok_column(toks) = match cur(toks)
+    _ => cur(toks).column;
 
 func case_is_wild(e) = match e
     Expr.EWild => true
