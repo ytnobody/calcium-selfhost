@@ -739,12 +739,23 @@ end;
 // returns its value directly), and `!?` would then take the failure branch and
 // bury the record. Accepting a plain record first makes this independent of which
 // shape arrives.
-func unwrap_callee(wrapped, st) = match types.is_hash(wrapped)
-    true => wrapped
-    false => unwrap_wrapped_callee(wrapped, st);
+func unwrap_callee(wrapped, st) = unwrap_steps(wrapped, st, 3);
 
-func unwrap_wrapped_callee(wrapped, st) = wrapped !? {
-    success(v) => v
+// A result can be wrapped more than once: an interpreted `func!` wraps its own return
+// in success, and `run_callee` is itself an effect function, so the reference VM wraps
+// that again. The budget bounds the loop, and anything that is not a result is
+// returned as it is rather than being handed to `!?` (which would abort on it).
+func unwrap_steps(wrapped, st, budget) = match types.type_of(wrapped)
+    "success" => unwrap_step(wrapped, st, budget, true)
+    "failure" => unwrap_step(wrapped, st, budget, false)
+    _ => wrapped;
+
+func unwrap_step(wrapped, st, budget, ok) = match budget <= 0
+    true => wrapped
+    false => unwrap_unwrap(wrapped, st, budget, ok);
+
+func unwrap_unwrap(wrapped, st, budget, ok) = wrapped !? {
+    success(v) => unwrap_steps(v, st, budget - 1)
     failure(e) => failed_callee(st, e)
 };
 
@@ -1257,9 +1268,22 @@ func! call_host(st, name, base, nargs) = do
 end;
 
 func! call_host_forward(st, name, items) = do
-    result = result_record(host_apply(name, items)).v;
+    result = host_result(host_apply(name, items));
     {finished: true, st: st, v: result}
 end;
+
+// host_apply is an effect function, so the reference VM wraps whatever it returns in
+// success. Taking `.v` off that wrapper directly would bury the value one level deep:
+// the recorded result is a hash, so unwrap the effect wrapper first, then the record.
+func host_result(r) = match types.type_of(r)
+    "success" => host_result_ok(r)
+    "failure" => failure("host function failed")
+    _ => result_record(r).v;
+
+func host_result_ok(r) = r !? {
+    success(v) => result_record(v).v
+    failure(e) => failure(e)
+};
 
 // call_n applies a function value to an argument array. The spread form
 // (`f(args...)`) cannot be used here: calling a *module member* with a spread
